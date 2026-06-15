@@ -27,13 +27,6 @@ enum Cmd {
     /// Manage mailboxes on the worker
     #[command(subcommand)]
     Mailbox(MailboxCmd),
-    /// Deprecated alias for `postr mailbox add`. Will be removed.
-    #[command(hide = true)]
-    AddMailbox {
-        address: String,
-        #[arg(long)]
-        name: Option<String>,
-    },
     /// Launch the TUI (default)
     Tui,
 }
@@ -88,7 +81,6 @@ async fn main() -> Result<()> {
         }) => mailbox_update(address, name, clear_name).await,
         Cmd::Mailbox(MailboxCmd::List) => mailbox_list().await,
         Cmd::Mailbox(MailboxCmd::Remove { address }) => mailbox_remove(address).await,
-        Cmd::AddMailbox { address, name } => mailbox_add(address, name).await,
         Cmd::Tui => tui_entry().await,
     }
 }
