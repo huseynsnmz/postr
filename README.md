@@ -1,6 +1,7 @@
 <div align="center">
   <h1>postr</h1>
   <p><em>A keyboard-first email TUI with an AI agent, running entirely on Cloudflare Workers</em></p>
+  <img src="./docs/main.png" alt="postr inbox view" width="800">
 </div>
 
 postr lets you send, receive, and manage emails from a single scrolling terminal buffer — all powered by your own Cloudflare account. Inbound mail arrives via [Cloudflare Email Routing](https://developers.cloudflare.com/email-routing/), each mailbox is isolated in its own [Durable Object](https://developers.cloudflare.com/durable-objects/) with a SQLite database, and attachments are stored in [R2](https://developers.cloudflare.com/r2/). An AI layer on top of [Workers AI](https://developers.cloudflare.com/workers-ai/) can summarize threads, draft replies, search across mail, and triage your inbox.
