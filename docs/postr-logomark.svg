@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 120 120" role="img" aria-label="postr">
+  <defs>
+    <linearGradient id="postrGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4FE8F5"></stop>
+      <stop offset="0.3" stop-color="#34C9F2"></stop>
+      <stop offset="0.7" stop-color="#1C5FD8"></stop>
+      <stop offset="1" stop-color="#1E40AF"></stop>
+    </linearGradient>
+  </defs>
+  <rect x="2.5" y="2.5" width="115" height="115" rx="28" fill="#14161C" stroke="#ECEFF31F" stroke-width="1.5"></rect>
+  <path d="M 40 38 L 70 60 L 40 82" fill="none" stroke="url(#postrGrad)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"></path>
+  <rect x="78" y="49" width="15" height="23" rx="3" fill="#4FE8F5"></rect>
+</svg>
