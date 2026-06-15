@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -933,12 +936,19 @@ impl App {
 
     fn handle_key_compose(&mut self, key: KeyEvent) {
         // Compose-wide control hotkeys come first.
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // Ctrl+Enter is the canonical send; many terminals can't disambiguate
+        // it from plain Enter, so we also accept Ctrl+S and Alt+Enter as
+        // aliases that the same terminals do deliver distinctly.
+        if (ctrl && matches!(key.code, KeyCode::Enter | KeyCode::Char('s')))
+            || (alt && matches!(key.code, KeyCode::Enter))
+        {
+            self.submit_compose();
+            return;
+        }
+        if ctrl {
             match key.code {
-                KeyCode::Enter | KeyCode::Char('s') => {
-                    self.submit_compose();
-                    return;
-                }
                 KeyCode::Char('d') => {
                     self.save_compose_draft();
                     return;
@@ -1311,12 +1321,25 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // Best-effort: ask the terminal for kitty-protocol modifier reporting so
+    // Ctrl+Enter, Alt+Enter etc. arrive as distinct key events instead of
+    // collapsing to plain Enter. Capable terminals (kitty, WezTerm, recent
+    // iTerm2, Ghostty, Alacritty) honor this; older ones (Terminal.app)
+    // silently ignore it. Either way crossterm falls back gracefully.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        )
+    );
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
