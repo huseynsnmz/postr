@@ -629,7 +629,9 @@ impl AppState {
 
     pub fn clear_feedback_if_expired(&mut self) {
         if let Some(fb) = &self.feedback {
-            if fb.shown_at.elapsed() > Duration::from_secs(5) {
+            // Shorter than the old 5 s — flashes are signal, not status. The
+            // user noted the previous TTL felt like the bar was permanently on.
+            if fb.shown_at.elapsed() > Duration::from_millis(2500) {
                 self.feedback = None;
             }
         }
@@ -658,6 +660,15 @@ impl ComposeState {
         let to = src.sender.clone();
         let to_cursor = to.len();
         let subject_cursor = subject.len();
+
+        let mut body = TextArea::default();
+        // Insert two blank lines first so the cursor lands above the
+        // attribution line — the user types the reply at the top and the
+        // quoted source sits underneath.
+        body.insert_str(build_quoted_body(src));
+        // Park the cursor at line 0, column 0.
+        body.move_cursor(tui_textarea::CursorMove::Top);
+
         Self {
             kind: ComposeKind::Reply {
                 in_reply_to: src.id.clone(),
@@ -668,7 +679,7 @@ impl ComposeState {
             to_cursor,
             subject,
             subject_cursor,
-            body: TextArea::default(),
+            body,
             focused: ComposeField::Body,
             submitting: false,
         }
@@ -678,21 +689,9 @@ impl ComposeState {
         let subject = strip_fwd_prefix(&src.subject);
         let subject = format!("Fwd: {subject}");
         let subject_cursor = subject.len();
-        // Build quoted body: "On <date>, <sender> wrote:\n" + "> " prefixed
-        // body lines. Reuse the body parser to flatten HTML and re-wrap.
-        let raw = src.body.as_deref().unwrap_or("");
-        let (visible, _quoted) = body::parse_body(raw, 72);
-        let mut quoted = String::new();
-        quoted.push('\n');
-        quoted.push('\n');
-        quoted.push_str(&format!("On {}, {} wrote:\n", src.date, src.sender));
-        for line in visible {
-            quoted.push_str("> ");
-            quoted.push_str(&line);
-            quoted.push('\n');
-        }
         let mut body = TextArea::default();
-        body.insert_str(&quoted);
+        body.insert_str(build_quoted_body(src));
+        body.move_cursor(tui_textarea::CursorMove::Top);
         Self {
             kind: ComposeKind::Forward {
                 source_email_id: src.id.clone(),
@@ -708,7 +707,27 @@ impl ComposeState {
             submitting: false,
         }
     }
+}
 
+/// Two blank lines + `"On <date>, <sender> wrote:"` + `"> "`-prefixed body
+/// lines. Re-uses the body parser to flatten HTML and re-wrap. Shared by
+/// reply and forward so both flows include the original message text.
+fn build_quoted_body(src: &EmailFull) -> String {
+    let raw = src.body.as_deref().unwrap_or("");
+    let (visible, _quoted) = body::parse_body(raw, 72);
+    let mut out = String::new();
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&format!("On {}, {} wrote:\n", src.date, src.sender));
+    for line in visible {
+        out.push_str("> ");
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+impl ComposeState {
     pub fn cycle_focus_forward(&mut self) {
         self.focused = match self.focused {
             ComposeField::To => ComposeField::Subject,

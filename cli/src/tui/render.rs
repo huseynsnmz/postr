@@ -873,10 +873,14 @@ fn draw_input(frame: &mut Frame, area: Rect, state: &AppState) {
 // ── Hint / status row ────────────────────────────────────────────────────────
 
 fn draw_hint(frame: &mut Frame, area: Rect) {
+    // Bottom hint reads as a passive legend — the user explicitly asked
+    // for it to be lighter than ordinary copy so it stops competing with
+    // the inbox rows. Keys = MUTED bold (~middle tier) and labels = FAINT
+    // (the dimmest tier we have).
     let key = Style::default()
-        .fg(theme::TEXT)
+        .fg(theme::MUTED)
         .add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(theme::MUTED);
+    let label = Style::default().fg(theme::FAINT);
     let sep = Span::styled("   ", label);
     let line = Line::from(vec![
         Span::styled(" ", label),
@@ -1224,9 +1228,9 @@ fn chip_line() -> Line<'static> {
 
 fn draw_reading_hint(frame: &mut Frame, area: Rect) {
     let key = Style::default()
-        .fg(theme::TEXT)
+        .fg(theme::MUTED)
         .add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(theme::MUTED);
+    let label = Style::default().fg(theme::FAINT);
     let line = Line::from(vec![
         Span::styled(" ", label),
         Span::styled("/", key),
@@ -1490,9 +1494,9 @@ fn compose_chip_line(c: &ComposeState) -> Line<'static> {
 
 fn draw_compose_hint(frame: &mut Frame, area: Rect) {
     let key = Style::default()
-        .fg(theme::TEXT)
+        .fg(theme::MUTED)
         .add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(theme::MUTED);
+    let label = Style::default().fg(theme::FAINT);
     let line = Line::from(vec![
         Span::styled(" ", label),
         Span::styled("Tab", key),
