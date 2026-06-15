@@ -62,7 +62,9 @@ impl From<&crate::api::client::ApiError> for ErrorKind {
 #[derive(Debug)]
 pub enum AppEvent {
     InboxLoaded(EmailList),
-    ThreadLoaded(ThreadFull),
+    /// `(mailbox_id, thread)` — mailbox the open thread belongs to, so
+    /// ReadingState can store it for routing per-message ops.
+    ThreadLoaded(String, ThreadFull),
     ActionDone(String),
     Error {
         kind: ErrorKind,
@@ -92,13 +94,35 @@ pub enum AppEvent {
     /// `/switch` opened the picker; the background `/cli/me` round-trip
     /// returned with the current mailbox list.
     MailboxesLoaded(Vec<crate::api::types::CliMailbox>),
+    /// `/switch all` finished fetching every mailbox's inbox. The vec is
+    /// `(mailbox_id, EmailList)` — order isn't significant since the merge
+    /// step sorts by date.
+    UnifiedInboxLoaded(Vec<(String, EmailList)>),
+    /// `/switch all` resolved the mailbox-id list via `/cli/me`; the next
+    /// step is to fan out the per-mailbox inbox fetches.
+    AllMailboxesResolved(Vec<String>),
+}
+
+/// Active mailbox scope: a single named mailbox, or the `/switch all`
+/// unified view across every registered mailbox.
+#[derive(Debug, Clone)]
+pub enum ActiveScope {
+    Single,
+    /// Mailbox ids included in the unified view. The label shown in the
+    /// inbox frame title is also derived from this.
+    All(Vec<String>),
 }
 
 pub struct App {
     pub state: AppState,
     pub should_quit: bool,
     pub client: Arc<ApiClient>,
+    /// Operative mailbox for "where do new messages come from" — used for
+    /// compose-from and any flow that needs a single mailbox even when the
+    /// inbox view is unified. In `ActiveScope::Single` this is the active
+    /// one; in `ActiveScope::All` it stays at the last single-mode value.
     pub mailbox_id: String,
+    pub scope: ActiveScope,
     pub tx: UnboundedSender<AppEvent>,
     pub cfg: Config,
     /// Transient context captured at `/summarize` spawn-time so the result
@@ -121,6 +145,7 @@ impl App {
             should_quit: false,
             client,
             mailbox_id,
+            scope: ActiveScope::Single,
             tx,
             cfg,
             summarize_context: None,
@@ -149,15 +174,18 @@ impl App {
 
     /// Switch the active mailbox at runtime: update state, persist the
     /// config, and reload the inbox. Idempotent if `new_id` matches the
-    /// current mailbox.
+    /// current mailbox **and** we're already in `ActiveScope::Single`
+    /// (otherwise we still need to flip out of unified mode).
     pub fn set_active_mailbox(
         &mut self,
         new_id: String,
         display_name: Option<String>,
     ) -> anyhow::Result<()> {
-        if new_id == self.mailbox_id {
+        let same_single = matches!(self.scope, ActiveScope::Single) && new_id == self.mailbox_id;
+        if same_single {
             return Ok(());
         }
+        self.scope = ActiveScope::Single;
         self.mailbox_id = new_id.clone();
         self.state.account.mailbox_id = new_id.clone();
         self.state.account.email = new_id.clone();
@@ -183,8 +211,14 @@ impl App {
     }
 
     pub fn spawn_load_inbox(&self) {
+        match &self.scope {
+            ActiveScope::Single => self.spawn_load_single_inbox(self.mailbox_id.clone()),
+            ActiveScope::All(ids) => self.spawn_load_all_inboxes(ids.clone()),
+        }
+    }
+
+    fn spawn_load_single_inbox(&self, mb: String) {
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             match client.get_inbox_list(&mb).await {
@@ -201,6 +235,40 @@ impl App {
         });
     }
 
+    fn spawn_load_all_inboxes(&self, ids: Vec<String>) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            // Fan out: each mailbox fetched independently; we tag each with
+            // its id so the merge step downstream can attribute rows.
+            let futures = ids.into_iter().map(|id| {
+                let client = client.clone();
+                async move {
+                    let result = client.get_inbox_list(&id).await;
+                    (id, result)
+                }
+            });
+            let results = futures_util::future::join_all(futures).await;
+            let mut chunks: Vec<(String, EmailList)> = Vec::new();
+            let mut first_err: Option<String> = None;
+            for (id, res) in results {
+                match res {
+                    Ok(list) => chunks.push((id, list)),
+                    Err(e) if first_err.is_none() => first_err = Some(format!("{id}: {e}")),
+                    Err(_) => {} // skip per-mailbox errors after the first surface
+                }
+            }
+            if chunks.is_empty() {
+                let _ = tx.send(AppEvent::Error {
+                    kind: ErrorKind::Network,
+                    message: first_err.unwrap_or_else(|| "all inbox fetches failed".into()),
+                });
+            } else {
+                let _ = tx.send(AppEvent::UnifiedInboxLoaded(chunks));
+            }
+        });
+    }
+
     pub fn spawn_open_selected(&mut self) {
         let Some(m) = self.state.selected_meta().cloned() else {
             return;
@@ -209,7 +277,7 @@ impl App {
         self.state.last_undoable = None;
         self.state.mode = Mode::Loading(LoadingKind::Thread);
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
+        let mb = m.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = match m.meta.thread_id.as_deref() {
@@ -218,7 +286,7 @@ impl App {
             };
             match result {
                 Ok(t) => {
-                    let _ = tx.send(AppEvent::ThreadLoaded(t));
+                    let _ = tx.send(AppEvent::ThreadLoaded(mb.clone(), t));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::Error {
@@ -230,12 +298,11 @@ impl App {
         });
     }
 
-    pub fn spawn_star(&self, email_id: String, on: bool) {
+    pub fn spawn_star(&self, email_id: String, on: bool, mailbox_id: String) {
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.star(&mb, &email_id, on).await {
+            match client.star(&mailbox_id, &email_id, on).await {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ActionDone(if on {
                         "starred".into()
@@ -253,34 +320,23 @@ impl App {
         });
     }
 
-    pub fn spawn_archive(&mut self, email_id: String) {
+    pub fn spawn_archive(&mut self, email_id: String, mailbox_id: String) {
         // Record the undo handle *before* the move, so a fast `u` press
         // after the flash can restore the row. Worker errors leave the
         // stale entry in place — at worst, `u` tries to move an email
         // that never moved and the user sees an error flash.
         self.state.last_undoable = Some(crate::state::UndoableAction::Archive {
             email_id: email_id.clone(),
+            mailbox_id: mailbox_id.clone(),
             prior_folder: "inbox".to_string(),
             recorded_at: std::time::Instant::now(),
         });
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.archive(&mb, &email_id).await {
+            match client.archive(&mailbox_id, &email_id).await {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ActionDone("Archived · u to undo".into()));
-                    match client.get_inbox_list(&mb).await {
-                        Ok(list) => {
-                            let _ = tx.send(AppEvent::InboxLoaded(list));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::Error {
-                                kind: (&e).into(),
-                                message: format!("inbox: {e}"),
-                            });
-                        }
-                    }
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::Error {
@@ -292,25 +348,13 @@ impl App {
         });
     }
 
-    pub fn spawn_delete(&self, email_id: String) {
+    pub fn spawn_delete(&self, email_id: String, mailbox_id: String) {
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.delete_email(&mb, &email_id).await {
+            match client.delete_email(&mailbox_id, &email_id).await {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ActionDone("deleted".into()));
-                    match client.get_inbox_list(&mb).await {
-                        Ok(list) => {
-                            let _ = tx.send(AppEvent::InboxLoaded(list));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::Error {
-                                kind: (&e).into(),
-                                message: format!("inbox: {e}"),
-                            });
-                        }
-                    }
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::Error {
@@ -336,27 +380,19 @@ impl App {
         }
         let crate::state::UndoableAction::Archive {
             email_id,
+            mailbox_id,
             prior_folder,
             ..
         } = action;
         let client = self.client.clone();
-        let mb = self.mailbox_id.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.move_email(&mb, &email_id, &prior_folder).await {
+            match client
+                .move_email(&mailbox_id, &email_id, &prior_folder)
+                .await
+            {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ActionDone("Restored".into()));
-                    match client.get_inbox_list(&mb).await {
-                        Ok(list) => {
-                            let _ = tx.send(AppEvent::InboxLoaded(list));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::Error {
-                                kind: (&e).into(),
-                                message: format!("inbox: {e}"),
-                            });
-                        }
-                    }
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::Error {
@@ -372,9 +408,27 @@ impl App {
 
     pub fn on_event(&mut self, ev: AppEvent) {
         match ev {
-            AppEvent::InboxLoaded(list) => self.state.set_inbox(list),
-            AppEvent::ThreadLoaded(t) => self.state.set_thread(t),
-            AppEvent::ActionDone(s) => self.state.flash_success(s),
+            AppEvent::InboxLoaded(list) => self.state.set_inbox(list, &self.mailbox_id),
+            AppEvent::UnifiedInboxLoaded(chunks) => {
+                self.state.set_unified_inbox(chunks);
+                self.state.account.email = "all mailboxes".into();
+            }
+            AppEvent::AllMailboxesResolved(ids) => {
+                if ids.is_empty() {
+                    self.state.flash_error("No mailboxes to merge");
+                    self.state.mode = Mode::Inbox;
+                    return;
+                }
+                self.scope = ActiveScope::All(ids.clone());
+                self.spawn_load_all_inboxes(ids);
+            }
+            AppEvent::ThreadLoaded(mb, t) => self.state.set_thread(t, mb),
+            AppEvent::ActionDone(s) => {
+                self.state.flash_success(s);
+                // Refresh the inbox so the affected row reflects the new state.
+                // Uses the current scope (single or unified) automatically.
+                self.spawn_load_inbox();
+            }
             AppEvent::Error { kind, message } => match kind {
                 ErrorKind::Unauthorized => self.handle_auth_failure(),
                 _ => self.state.set_error(message),
@@ -571,15 +625,38 @@ impl App {
             self.handle_key_mailbox_picker(key);
             return;
         }
-        // Bare `q` only quits when we're not in a typing-mode (compose,
-        // command menu, discard confirm) — otherwise it's just a character.
+        // Bare `q` is the soft-exit key: from non-inbox screens it returns to
+        // the inbox; from the inbox itself, the first `q` arms a "press q
+        // again to quit" prompt and the second actually exits. Typing-modes
+        // pass the keystroke through to the buffer.
         let is_typing = matches!(
             self.state.mode,
             Mode::Composing | Mode::Command { .. } | Mode::ComposeDiscardConfirm
         );
         if !is_typing && matches!(key.code, KeyCode::Char('q')) {
-            self.should_quit = true;
+            if matches!(self.state.mode, Mode::Inbox) {
+                if self.state.quit_armed {
+                    self.should_quit = true;
+                } else {
+                    self.state.quit_armed = true;
+                    self.state.flash_info("Press q again to quit");
+                }
+            } else {
+                // Anywhere else: ferry the user back to the inbox.
+                self.state.reading = None;
+                self.state.compose = None;
+                self.state.command = None;
+                self.state.ai = None;
+                self.state.show_shortcuts = false;
+                self.state.pending_confirm = None;
+                self.state.mailbox_picker = None;
+                self.state.mode = Mode::Inbox;
+            }
             return;
+        }
+        // Any non-`q` keystroke while we're on the inbox disarms the prompt.
+        if self.state.quit_armed && matches!(self.state.mode, Mode::Inbox) {
+            self.state.quit_armed = false;
         }
 
         let mode = self.state.mode.clone();
@@ -724,7 +801,7 @@ impl App {
         tokio::spawn(async move {
             match client.get_thread(&mb, &tid).await {
                 Ok(t) => {
-                    let _ = tx.send(AppEvent::ThreadLoaded(t));
+                    let _ = tx.send(AppEvent::ThreadLoaded(mb.clone(), t));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::Error {
@@ -855,11 +932,17 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.state.pending_confirm = None;
                     match confirm {
-                        PendingConfirm::DeleteFromInbox { email_id } => {
-                            self.spawn_delete(email_id);
+                        PendingConfirm::DeleteFromInbox {
+                            email_id,
+                            mailbox_id,
+                        } => {
+                            self.spawn_delete(email_id, mailbox_id);
                         }
-                        PendingConfirm::DeleteFromReading { email_id } => {
-                            self.spawn_delete(email_id);
+                        PendingConfirm::DeleteFromReading {
+                            email_id,
+                            mailbox_id,
+                        } => {
+                            self.spawn_delete(email_id, mailbox_id);
                             self.state.mode = Mode::Inbox;
                             self.state.reading = None;
                         }
@@ -896,18 +979,19 @@ impl App {
                     if let Some(row) = self.state.messages.get_mut(self.state.selected_index) {
                         row.meta.starred = new_val;
                     }
-                    self.spawn_star(m.meta.id, new_val);
+                    self.spawn_star(m.meta.id, new_val, m.mailbox_id);
                 }
             }
             KeyCode::Char('e') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
-                    self.spawn_archive(m.meta.id);
+                    self.spawn_archive(m.meta.id, m.mailbox_id);
                 }
             }
             KeyCode::Char('d') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
                     self.state.pending_confirm = Some(PendingConfirm::DeleteFromInbox {
                         email_id: m.meta.id,
+                        mailbox_id: m.mailbox_id,
                     });
                 }
             }
@@ -937,9 +1021,15 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.state.pending_confirm = None;
                     match confirm {
-                        PendingConfirm::DeleteFromInbox { email_id }
-                        | PendingConfirm::DeleteFromReading { email_id } => {
-                            self.spawn_delete(email_id);
+                        PendingConfirm::DeleteFromInbox {
+                            email_id,
+                            mailbox_id,
+                        }
+                        | PendingConfirm::DeleteFromReading {
+                            email_id,
+                            mailbox_id,
+                        } => {
+                            self.spawn_delete(email_id, mailbox_id);
                             self.state.mode = Mode::Inbox;
                             self.state.reading = None;
                         }
@@ -1004,16 +1094,18 @@ impl App {
                     let msg = &r.thread[r.message_idx];
                     let new_val = !msg.starred;
                     let id = msg.id.clone();
+                    let mb = r.mailbox_id.clone();
                     if let Some(r_mut) = self.state.reading.as_mut() {
                         r_mut.thread[r_mut.message_idx].starred = new_val;
                     }
-                    self.spawn_star(id, new_val);
+                    self.spawn_star(id, new_val, mb);
                 }
             }
             KeyCode::Char('e') => {
                 if let Some(r) = self.state.reading.as_ref() {
                     let id = r.thread[r.message_idx].id.clone();
-                    self.spawn_archive(id);
+                    let mb = r.mailbox_id.clone();
+                    self.spawn_archive(id, mb);
                     self.state.mode = Mode::Inbox;
                     self.state.reading = None;
                 }
@@ -1021,8 +1113,11 @@ impl App {
             KeyCode::Char('d') => {
                 if let Some(r) = self.state.reading.as_ref() {
                     let id = r.thread[r.message_idx].id.clone();
-                    self.state.pending_confirm =
-                        Some(PendingConfirm::DeleteFromReading { email_id: id });
+                    let mb = r.mailbox_id.clone();
+                    self.state.pending_confirm = Some(PendingConfirm::DeleteFromReading {
+                        email_id: id,
+                        mailbox_id: mb,
+                    });
                 }
             }
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Reading),
@@ -1236,15 +1331,21 @@ impl App {
             "reply" => self.enter_compose_reply(),
             "forward" => self.enter_compose_forward(),
             "archive" => {
-                if let Some(id) = self.current_target_id() {
-                    self.spawn_archive(id);
+                if let Some((id, mb)) = self.current_target() {
+                    self.spawn_archive(id, mb);
                 }
             }
             "delete" => {
-                if let Some(id) = self.current_target_id() {
+                if let Some((id, mb)) = self.current_target() {
                     let action = match self.state.reading {
-                        Some(_) => PendingConfirm::DeleteFromReading { email_id: id },
-                        None => PendingConfirm::DeleteFromInbox { email_id: id },
+                        Some(_) => PendingConfirm::DeleteFromReading {
+                            email_id: id,
+                            mailbox_id: mb,
+                        },
+                        None => PendingConfirm::DeleteFromInbox {
+                            email_id: id,
+                            mailbox_id: mb,
+                        },
                     };
                     self.state.pending_confirm = Some(action);
                 }
@@ -1355,14 +1456,12 @@ impl App {
 
     /// `/switch <addr>` swaps directly when `<addr>` is a full email; for any
     /// other token (an alias or fragment) the picker opens pre-filtered to
-    /// that string so fuzzy match resolves it. `/switch all` is the
-    /// unified-inbox stub.
+    /// that string so fuzzy match resolves it. `/switch all` activates the
+    /// unified inbox across every registered mailbox.
     fn run_switch(&mut self, args: &str) {
         let arg = args.trim();
         if arg.eq_ignore_ascii_case("all") {
-            self.state
-                .flash_info("Unified inbox lands next — pick a single mailbox for now");
-            self.open_mailbox_picker_with_query("");
+            self.enter_unified_inbox();
             return;
         }
         if arg.contains('@') {
@@ -1373,6 +1472,35 @@ impl App {
             return;
         }
         self.open_mailbox_picker_with_query(arg);
+    }
+
+    /// Activate the unified inbox view across all registered mailboxes.
+    /// Fetches the mailbox list on its own, then flips scope to All and
+    /// kicks off the parallel inbox fetches.
+    fn enter_unified_inbox(&mut self) {
+        self.state.messages.clear();
+        self.state.selected_index = 0;
+        self.state.more_count = 0;
+        self.state.reading = None;
+        self.state.mode = Mode::Loading(LoadingKind::Inbox);
+        self.state.flash_info("Loading all inboxes…");
+
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.me().await {
+                Ok(me) => {
+                    let ids: Vec<String> = me.mailboxes.into_iter().map(|m| m.id).collect();
+                    let _ = tx.send(AppEvent::AllMailboxesResolved(ids));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: format!("mailboxes: {e}"),
+                    });
+                }
+            }
+        });
     }
 
     fn open_mailbox_picker_with_query(&mut self, query: &str) {
@@ -1462,11 +1590,16 @@ impl App {
         }
     }
 
-    fn current_target_id(&self) -> Option<String> {
+    /// Reading view takes precedence; otherwise the selected inbox row.
+    /// Returns `(email_id, mailbox_id)` so callers can route ops to the
+    /// right DO even in the unified inbox view.
+    fn current_target(&self) -> Option<(String, String)> {
         if let Some(r) = self.state.reading.as_ref() {
-            return Some(r.thread[r.message_idx].id.clone());
+            return Some((r.thread[r.message_idx].id.clone(), r.mailbox_id.clone()));
         }
-        self.state.selected_meta().map(|m| m.meta.id.clone())
+        self.state
+            .selected_meta()
+            .map(|m| (m.meta.id.clone(), m.mailbox_id.clone()))
     }
 
     fn toggle_star_on_target(&mut self) {
@@ -1474,10 +1607,11 @@ impl App {
             let msg = &r.thread[r.message_idx];
             let new_val = !msg.starred;
             let id = msg.id.clone();
+            let mb = r.mailbox_id.clone();
             if let Some(r_mut) = self.state.reading.as_mut() {
                 r_mut.thread[r_mut.message_idx].starred = new_val;
             }
-            self.spawn_star(id, new_val);
+            self.spawn_star(id, new_val, mb);
             return;
         }
         if let Some(m) = self.state.selected_meta().cloned() {
@@ -1485,7 +1619,7 @@ impl App {
             if let Some(row) = self.state.messages.get_mut(self.state.selected_index) {
                 row.meta.starred = new_val;
             }
-            self.spawn_star(m.meta.id, new_val);
+            self.spawn_star(m.meta.id, new_val, m.mailbox_id);
         }
     }
 

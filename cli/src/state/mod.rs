@@ -73,10 +73,15 @@ pub enum Mode {
     },
 }
 
-/// Inbox row: wire shape + a couple of computed booleans.
+/// Inbox row: wire shape + a couple of computed booleans + which mailbox
+/// the row was fetched from (used by the unified-inbox `/switch all` view
+/// so per-row operations like delete/star route to the right DO).
 #[derive(Debug, Clone)]
 pub struct TuiMessage {
     pub meta: EmailMeta,
+    /// Mailbox the row came from — always set; in single-mailbox mode it's
+    /// just the active mailbox's id; in unified mode it varies row to row.
+    pub mailbox_id: String,
     /// TODO(phase4): `EmailMeta` has no attachment hint; hydrate by opening
     /// the row or by extending the Worker list response with a
     /// `has_attachments` bool.
@@ -87,9 +92,10 @@ pub struct TuiMessage {
 }
 
 impl TuiMessage {
-    fn from_meta(meta: EmailMeta) -> Self {
+    pub fn from_meta(meta: EmailMeta, mailbox_id: String) -> Self {
         Self {
             meta,
+            mailbox_id,
             has_attachment: false,
             urgent: false,
         }
@@ -109,6 +115,11 @@ pub struct Account {
 pub struct ReadingState {
     pub thread: ThreadFull,
     pub message_idx: usize,
+    /// Mailbox the open thread belongs to — set when the inbox row was
+    /// opened. Reply/forward/archive/delete all route through this id, not
+    /// through the global active mailbox, so the unified-inbox view operates
+    /// on the right DO.
+    pub mailbox_id: String,
     pub body_lines: Vec<String>,
     pub quoted_collapsed: bool,
     pub quoted_lines: Vec<String>,
@@ -143,6 +154,9 @@ pub struct Feedback {
 pub enum UndoableAction {
     Archive {
         email_id: String,
+        /// Mailbox the email belonged to at archive time — needed because
+        /// the unified inbox view can stage archives from arbitrary mailboxes.
+        mailbox_id: String,
         prior_folder: String,
         recorded_at: Instant,
     },
@@ -329,6 +343,9 @@ pub struct AppState {
     /// Pending destructive action awaiting `y` confirmation. Drawn as a
     /// small inline prompt at the bottom of the screen.
     pub pending_confirm: Option<PendingConfirm>,
+    /// `true` after the user pressed `q` on the inbox once. A second `q`
+    /// quits; any other key clears the flag. Surfaced as a flash hint.
+    pub quit_armed: bool,
     /// `/switch` mailbox picker. `Some` while the centered overlay is open;
     /// resolved by `j/k/↑/↓` + `Enter` (or `Esc` to cancel).
     pub mailbox_picker: Option<MailboxPickerState>,
@@ -391,9 +408,15 @@ impl MailboxPickerState {
 #[derive(Debug, Clone)]
 pub enum PendingConfirm {
     /// Hard-delete an email from the inbox view.
-    DeleteFromInbox { email_id: String },
+    DeleteFromInbox {
+        email_id: String,
+        mailbox_id: String,
+    },
     /// Hard-delete the currently open thread message.
-    DeleteFromReading { email_id: String },
+    DeleteFromReading {
+        email_id: String,
+        mailbox_id: String,
+    },
 }
 
 impl AppState {
@@ -414,6 +437,7 @@ impl AppState {
             show_shortcuts: false,
             pending_confirm: None,
             mailbox_picker: None,
+            quit_armed: false,
         }
     }
 
@@ -429,12 +453,15 @@ impl AppState {
         }
     }
 
-    pub fn set_inbox(&mut self, list: EmailList) {
+    pub fn set_inbox(&mut self, list: EmailList, mailbox_id: &str) {
         let metas = list.emails;
         let total = list.total_count as u32;
         let unread = metas.iter().filter(|m| !m.read).count() as u32;
         let len = metas.len() as u32;
-        self.messages = metas.into_iter().map(TuiMessage::from_meta).collect();
+        self.messages = metas
+            .into_iter()
+            .map(|m| TuiMessage::from_meta(m, mailbox_id.to_string()))
+            .collect();
         // Clamp selection.
         if self.selected_index >= self.messages.len() && !self.messages.is_empty() {
             self.selected_index = self.messages.len() - 1;
@@ -448,7 +475,41 @@ impl AppState {
         self.mode = Mode::Inbox;
     }
 
-    pub fn set_thread(&mut self, thread: ThreadFull) {
+    /// Sort + flatten merged inboxes for the unified `/switch all` view.
+    /// `chunks` is `[(mailbox_id, EmailList), …]`. Each row remembers its
+    /// owning mailbox so single-row ops route to the right DO.
+    pub fn set_unified_inbox(&mut self, chunks: Vec<(String, EmailList)>) {
+        let mut rows: Vec<TuiMessage> = Vec::new();
+        let mut total: u64 = 0;
+        let mut unread: u64 = 0;
+        for (mailbox_id, list) in chunks {
+            total = total.saturating_add(list.total_count);
+            for m in list.emails {
+                if !m.read {
+                    unread += 1;
+                }
+                rows.push(TuiMessage::from_meta(m, mailbox_id.clone()));
+            }
+        }
+        // Sort newest-first by RFC date string. Falls back to lexicographic
+        // for malformed dates — the worker only emits RFC 3339 so this
+        // matters in practice for empty strings only.
+        rows.sort_by(|a, b| b.meta.date.cmp(&a.meta.date));
+        let len = rows.len() as u32;
+        self.messages = rows;
+        if self.selected_index >= self.messages.len() && !self.messages.is_empty() {
+            self.selected_index = self.messages.len() - 1;
+        } else if self.messages.is_empty() {
+            self.selected_index = 0;
+        }
+        self.account.unread_count = unread as u32;
+        self.account.total_count = (total as u32).max(len);
+        self.account.last_synced = "just now".into();
+        self.more_count = self.account.total_count.saturating_sub(len);
+        self.mode = Mode::Inbox;
+    }
+
+    pub fn set_thread(&mut self, thread: ThreadFull, mailbox_id: String) {
         if thread.is_empty() {
             self.set_error("empty thread".into());
             return;
@@ -461,6 +522,7 @@ impl AppState {
         self.reading = Some(ReadingState {
             thread,
             message_idx,
+            mailbox_id,
             body_lines: visible,
             quoted_collapsed: true,
             quoted_lines: quoted,
@@ -724,8 +786,8 @@ mod tests {
     fn selected_next_clamps_at_last_row() {
         let mut s = AppState::empty(account());
         s.messages = vec![
-            TuiMessage::from_meta(meta("a", true)),
-            TuiMessage::from_meta(meta("b", true)),
+            TuiMessage::from_meta(meta("a", true), "test@x.com".into()),
+            TuiMessage::from_meta(meta("b", true), "test@x.com".into()),
         ];
         s.selected_index = 1;
         s.selected_next();
@@ -749,10 +811,13 @@ mod tests {
     #[test]
     fn set_inbox_computes_unread_and_more() {
         let mut s = AppState::empty(account());
-        s.set_inbox(EmailList {
-            emails: vec![meta("a", false), meta("b", true), meta("c", false)],
-            total_count: 10,
-        });
+        s.set_inbox(
+            EmailList {
+                emails: vec![meta("a", false), meta("b", true), meta("c", false)],
+                total_count: 10,
+            },
+            "test@x.com",
+        );
         assert_eq!(s.account.unread_count, 2);
         assert_eq!(s.account.total_count, 10);
         assert_eq!(s.more_count, 7);
@@ -762,10 +827,13 @@ mod tests {
     fn set_inbox_total_count_at_least_visible_len() {
         // Worker may report a stale total < page size; we floor at len.
         let mut s = AppState::empty(account());
-        s.set_inbox(EmailList {
-            emails: vec![meta("a", true), meta("b", true)],
-            total_count: 0,
-        });
+        s.set_inbox(
+            EmailList {
+                emails: vec![meta("a", true), meta("b", true)],
+                total_count: 0,
+            },
+            "test@x.com",
+        );
         assert_eq!(s.account.total_count, 2);
         assert_eq!(s.more_count, 0);
     }
@@ -774,10 +842,13 @@ mod tests {
     fn set_inbox_clamps_selected_when_list_shrinks() {
         let mut s = AppState::empty(account());
         s.selected_index = 5;
-        s.set_inbox(EmailList {
-            emails: vec![meta("a", true), meta("b", true)],
-            total_count: 2,
-        });
+        s.set_inbox(
+            EmailList {
+                emails: vec![meta("a", true), meta("b", true)],
+                total_count: 2,
+            },
+            "test@x.com",
+        );
         assert_eq!(s.selected_index, 1);
     }
 
@@ -817,6 +888,7 @@ mod tests {
         // Use a recorded_at far in the past so we don't have to sleep.
         let action = UndoableAction::Archive {
             email_id: "e1".into(),
+            mailbox_id: "test@x.com".into(),
             prior_folder: "inbox".into(),
             recorded_at: Instant::now() - Duration::from_secs(31),
         };
@@ -824,6 +896,7 @@ mod tests {
 
         let fresh = UndoableAction::Archive {
             email_id: "e1".into(),
+            mailbox_id: "test@x.com".into(),
             prior_folder: "inbox".into(),
             recorded_at: Instant::now(),
         };
@@ -835,6 +908,7 @@ mod tests {
         let mut s = AppState::empty(account());
         s.last_undoable = Some(UndoableAction::Archive {
             email_id: "e1".into(),
+            mailbox_id: "test@x.com".into(),
             prior_folder: "inbox".into(),
             recorded_at: Instant::now() - Duration::from_secs(31),
         });
@@ -847,6 +921,7 @@ mod tests {
         let mut s = AppState::empty(account());
         s.last_undoable = Some(UndoableAction::Archive {
             email_id: "e1".into(),
+            mailbox_id: "test@x.com".into(),
             prior_folder: "inbox".into(),
             recorded_at: Instant::now(),
         });

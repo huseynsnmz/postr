@@ -369,7 +369,8 @@ fn draw_inbox(frame: &mut Frame, app: &App) {
         .split(area);
 
     draw_welcome(frame, chunks[0], &app.state);
-    draw_rows(frame, chunks[2], &app.state);
+    let unified = matches!(app.scope, crate::tui::app::ActiveScope::All(_));
+    draw_rows(frame, chunks[2], &app.state, unified);
     draw_more(frame, chunks[3], app.state.more_count);
     draw_input(frame, chunks[5], &app.state);
     if let Some(fb) = app.state.feedback.as_ref() {
@@ -428,9 +429,9 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
 
 // ── Message rows ─────────────────────────────────────────────────────────────
 
-fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
-    // Block title carries the account email so a future multi-mailbox switch
-    // surfaces in the same place.
+fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState, unified: bool) {
+    // Block title carries the account email — or "all mailboxes" in unified
+    // mode — so the active scope is visible at a glance.
     let title = format!(" INBOX · {} ", state.account.email);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -452,22 +453,30 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
     const W_TIME: usize = 12;
     // 1-cell gutter between subject and time.
     const TIME_GUTTER: usize = 1;
-    // Give the sender enough room for typical email locals before truncating;
-    // when the terminal is narrow we clamp so subject always gets ≥ 18 cells.
     let w_sender = compute_sender_width(total_w);
+    // Unified mode squeezes a "Mailbox" column between the number and the
+    // sender. Fixed width keeps alignment cheap; on narrow terminals it's
+    // simply truncated to fit.
+    let w_mailbox = if unified { 18 } else { 0 };
 
-    let fixed = W_MARKER + W_NUMBER + w_sender + W_GLYPH + TIME_GUTTER + W_TIME;
+    let fixed = W_MARKER + W_NUMBER + w_mailbox + w_sender + W_GLYPH + TIME_GUTTER + W_TIME;
     let subject_w = total_w.saturating_sub(fixed);
 
     let muted = Style::default().fg(theme::MUTED);
-    let header = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled("  ", muted),
         Span::styled(format!("{:>2} ", "#"), muted),
+    ];
+    if unified {
+        header_spans.push(Span::styled(pad_right("Mailbox", w_mailbox), muted));
+    }
+    header_spans.extend([
         Span::styled(pad_right("Sender", w_sender), muted),
         Span::styled("  ", muted),
         Span::styled(pad_right("Subject", subject_w), muted),
         Span::styled(format!(" {}", pad_right("Date", W_TIME)), muted),
     ]);
+    let header = Line::from(header_spans);
 
     let take_n = (inner.height as usize).saturating_sub(1);
     let mut lines: Vec<Line> = Vec::with_capacity(take_n + 1);
@@ -486,6 +495,7 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
                     total_w,
                     W_MARKER,
                     W_NUMBER,
+                    w_mailbox,
                     w_sender,
                     W_GLYPH,
                     TIME_GUTTER,
@@ -513,6 +523,7 @@ fn row_line(
     total_w: usize,
     w_marker: usize,
     w_number: usize,
+    w_mailbox: usize,
     w_sender: usize,
     w_glyph: usize,
     time_gutter: usize,
@@ -531,7 +542,7 @@ fn row_line(
     };
     let unread = !msg.meta.read;
 
-    let fixed = w_marker + w_number + w_sender + w_glyph + time_gutter + w_time;
+    let fixed = w_marker + w_number + w_mailbox + w_sender + w_glyph + time_gutter + w_time;
     let subject_w = total_w.saturating_sub(fixed);
 
     let row_bg = if selected {
@@ -576,6 +587,21 @@ fn row_line(
     let sender_style = if unread { text_bold } else { text_dim };
     let sender_span = Span::styled(sender_padded, sender_style);
 
+    // Unified-mode mailbox column (or empty when w_mailbox == 0).
+    let mailbox_span = if w_mailbox > 0 {
+        let local = msg
+            .mailbox_id
+            .split_once('@')
+            .map(|(local, _)| local.to_string())
+            .unwrap_or_else(|| msg.mailbox_id.clone());
+        let label = format!("#{local}");
+        let label_disp = truncate_cells(&label, w_mailbox.saturating_sub(1));
+        let label_padded = pad_right(&label_disp, w_mailbox);
+        Span::styled(label_padded, apply_bg(Style::default().fg(theme::VIOLET)))
+    } else {
+        Span::styled(String::new(), apply_bg(Style::default()))
+    };
+
     let (glyph_char, glyph_color) = if msg.urgent {
         (theme::G_URGENT, theme::RED)
     } else if unread {
@@ -611,6 +637,7 @@ fn row_line(
     let mut line = Line::from(vec![
         marker_span,
         number_span,
+        mailbox_span,
         sender_span,
         glyph_span,
         subject_span,
