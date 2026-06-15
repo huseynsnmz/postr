@@ -21,7 +21,7 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 
    You'll be prompted for `DOMAINS` — the domain you want to receive mail for.
 
-2. **Configure Cloudflare Access** — Enable [one-click Cloudflare Access](https://developers.cloudflare.com/changelog/post/2025-10-03-one-click-access-for-workers/) on the worker. Set the displayed `POLICY_AUD` and `TEAM_DOMAIN` as worker secrets, and set `ENVIRONMENT=production`.
+2. **Make sure Cloudflare Access is off** for this worker — Settings → Cloudflare Access toggle. postr has no web UI and authenticates the CLI with a bearer token (step 5), so Access would just block the CLI at the edge. If you want Access on later for a web UI, add a **Bypass** policy for path `/api/v1/*` so CLI routes reach the worker.
 
 3. **Set up Email Routing** — Create a catch-all rule on your domain that forwards to this worker.
 
@@ -48,7 +48,7 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 ### Troubleshooting
 
 1. **`Token rejected.`** — The worker's `CLI_TOKEN` was rotated. Run `postr login` again.
-2. **`Cloudflare Access must be configured in production`** — Set `POLICY_AUD` and `TEAM_DOMAIN` secrets, or set `ENVIRONMENT=development` for local dev.
+2. **`302 → cloudflareaccess.com/cdn-cgi/access/login`** — Cloudflare Access is enabled on the worker and intercepting at the edge. Turn Access off for this worker, or add a Bypass policy for `/api/v1/*`. (See step 2 above.)
 3. **`Could not resolve "cloudflare:email"` / `externref table required for catch wrappers`** — Run `./worker/tools/install.sh` to (re-)install the pinned `worker-build`.
 4. **Boxes instead of glyphs in the TUI** — Use a Nerd-Font-capable terminal font.
 
