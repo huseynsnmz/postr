@@ -3,7 +3,7 @@
 	"name": "postr-worker",
 	"compatibility_date": "2025-11-28",
 	"main": "build/worker/shim.mjs",
-	// Pinned to worker-build 0.8.1 — newer (0.8.5+) injects
+	// Pinned to worker-build 0.8.4 — newer (0.8.5+) injects
 	// --force-enable-abort-handler into wasm-bindgen 0.2.125, which requires
 	// an externref table Rust's wasm32-unknown-unknown doesn't currently emit.
 	// Re-install via: tools/install.sh.

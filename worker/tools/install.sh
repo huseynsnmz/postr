@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install pinned build tooling for postr-worker.
 #
-# We pin worker-build at 0.8.1 because newer versions (0.8.5+) inject
+# We pin worker-build at 0.8.4 because newer versions (0.8.5+) inject
 # --force-enable-abort-handler into wasm-bindgen, which requires an
 # externref table that Rust's wasm32-unknown-unknown doesn't emit. Pinning
 # the older version avoids the requirement entirely.
