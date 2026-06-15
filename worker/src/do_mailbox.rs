@@ -410,6 +410,11 @@ struct EmailListSqlRow {
     thread_id: Option<String>,
     folder_id: Option<String>,
     snippet: Option<String>,
+    /// Lit by `EXISTS (SELECT 1 FROM attachments ...)` in the list query.
+    /// Defaults to 0 when the projection doesn't include it (other call
+    /// sites that share `meta_from_sql` won't break).
+    #[serde(default)]
+    has_attachments: i64,
 }
 
 #[derive(Deserialize)]
@@ -468,6 +473,7 @@ fn meta_from_sql(r: EmailListSqlRow) -> EmailMeta {
         thread_id: r.thread_id,
         folder_id: r.folder_id,
         snippet: r.snippet,
+        has_attachments: r.has_attachments != 0,
     }
 }
 
@@ -553,7 +559,8 @@ impl MailboxDO {
         let query = format!(
             "SELECT id, subject, sender, recipient, cc, bcc, date, read, starred,
                     in_reply_to, email_references, thread_id, folder_id,
-                    SUBSTR(body, 1, 300) as snippet
+                    SUBSTR(body, 1, 300) as snippet,
+                    (SELECT COUNT(1) > 0 FROM attachments WHERE email_id = emails.id) as has_attachments
              FROM emails
              {where_clause}
              ORDER BY {sort_col} {sort_dir}
@@ -977,7 +984,8 @@ impl MailboxDO {
             "SELECT e.id, e.subject, e.sender, e.recipient, e.cc, e.bcc, e.date,
                     e.read, e.starred, e.in_reply_to, e.email_references,
                     e.thread_id, e.folder_id,
-                    SUBSTR(e.body, 1, 300) as snippet
+                    SUBSTR(e.body, 1, 300) as snippet,
+                    (SELECT COUNT(1) > 0 FROM attachments WHERE email_id = e.id) as has_attachments
              FROM emails e
              {where_clause}
              ORDER BY e.date DESC

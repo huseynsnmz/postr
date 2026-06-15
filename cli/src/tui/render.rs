@@ -427,10 +427,12 @@ fn draw_shortcuts_overlay(frame: &mut Frame, mode: &Mode) {
         kv("g / G", "jump to top / bottom"),
         kv("1–9", "jump to row"),
         kv("⏎", "open selected"),
+        kv("Space", "toggle multi-select"),
+        kv("Esc", "clear multi-select"),
         kv("c", "compose new"),
-        kv("s", "toggle star"),
-        kv("e", "archive"),
-        kv("d", "delete"),
+        kv("s", "toggle star (single / batch)"),
+        kv("e", "archive (single / batch)"),
+        kv("d", "trash / delete (single / batch)"),
         kv("u", "undo last archive"),
         kv("r", "refresh"),
         kv("/", "open command popover"),
@@ -550,9 +552,19 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState, unified: bool) {
     // Block title carries the folder + account email — or "all mailboxes"
-    // in unified mode — so the active scope is visible at a glance.
+    // in unified mode — so the active scope is visible at a glance. When a
+    // multi-selection is active, we append "· N selected" so the user can
+    // see the count without scanning the rows.
     let folder_label = state.folder.to_uppercase();
-    let title = format!(" {folder_label} · {} ", state.account.email);
+    let picked_n = state.multi_selected.len();
+    let title = if picked_n > 0 {
+        format!(
+            " {folder_label} · {} · {picked_n} selected ",
+            state.account.email
+        )
+    } else {
+        format!(" {folder_label} · {} ", state.account.email)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -608,10 +620,12 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState, unified: bool) {
             .take(take_n)
             .enumerate()
             .map(|(i, m)| {
+                let picked = state.multi_selected.contains_key(&m.meta.id);
                 row_line(
                     i,
                     m,
                     state.selected_index == i,
+                    picked,
                     total_w,
                     W_MARKER,
                     W_NUMBER,
@@ -640,6 +654,7 @@ fn row_line(
     idx: usize,
     msg: &TuiMessage,
     selected: bool,
+    picked: bool,
     total_w: usize,
     w_marker: usize,
     w_number: usize,
@@ -691,7 +706,21 @@ fn row_line(
     );
     let text_dim = apply_bg(Style::default().fg(theme::MUTED));
 
-    let marker_span = if selected {
+    // Marker column: ▣ when the row is in the multi-selection, ❯ when it's
+    // the currently-highlighted nav target, otherwise blank. The two states
+    // are independent (a row can be both highlighted and picked), so picked
+    // wins for the glyph color and the nav highlight is implicit via the
+    // selected-row background.
+    let marker_span = if picked {
+        Span::styled(
+            "▣ ".to_string(),
+            apply_bg(
+                Style::default()
+                    .fg(theme::SIGNAL_LIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    } else if selected {
         Span::styled("❯ ".to_string(), signal_bold)
     } else {
         Span::styled("  ".to_string(), apply_bg(Style::default()))
@@ -860,6 +889,9 @@ fn draw_hint(frame: &mut Frame, area: Rect) {
         Span::styled("⏎", key),
         Span::styled(" open", label),
         sep.clone(),
+        Span::styled("␣", key),
+        Span::styled(" pick", label),
+        sep.clone(),
         Span::styled("c", key),
         Span::styled(" compose", label),
         sep.clone(),
@@ -973,19 +1005,29 @@ fn draw_reading(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
 
+    let msg = &reading.thread[reading.message_idx];
+
+    // Dynamic HEADERS frame height: 4 fixed rows (Subject / From / To /
+    // Date) + 1 if Folder is shown + 1 if Attachments are shown + 2 borders.
+    let has_folder = msg
+        .folder_id
+        .as_deref()
+        .map(|f| !f.is_empty() && f != "inbox")
+        .unwrap_or(false);
+    let has_attachments = !msg.attachments.is_empty();
+    let header_height = 4u16 + (has_folder as u16) + (has_attachments as u16) + 2;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // echo "› {n}"
-            Constraint::Length(7), // HEADERS frame (border + 4-5 label rows + border)
-            Constraint::Min(0),    // body
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // chips
-            Constraint::Length(1), // hint / status
+            Constraint::Length(1),             // echo "› {n}"
+            Constraint::Length(header_height), // HEADERS frame
+            Constraint::Min(0),                // body
+            Constraint::Length(1),             // spacer
+            Constraint::Length(1),             // chips
+            Constraint::Length(1),             // hint / status
         ])
         .split(area);
-
-    let msg = &reading.thread[reading.message_idx];
 
     let echo = Line::from(vec![
         Span::styled(
@@ -1062,6 +1104,21 @@ fn draw_reading(frame: &mut Frame, app: &App) {
                 format!("{} {}", theme::G_LABEL, label),
                 Style::default().fg(theme::VIOLET),
             ),
+        ]));
+    }
+    if !msg.attachments.is_empty() {
+        let names: Vec<String> = msg
+            .attachments
+            .iter()
+            .map(|a| format!("{} ({})", a.filename, format_bytes(a.size)))
+            .collect();
+        header_lines.push(Line::from(vec![
+            Span::styled("Attach   ", muted),
+            Span::styled(
+                format!("{} ", theme::G_ATTACHMENT),
+                Style::default().fg(theme::TEAL),
+            ),
+            Span::styled(names.join(", "), text),
         ]));
     }
     frame.render_widget(Paragraph::new(header_lines), header_inner);
@@ -2171,6 +2228,22 @@ fn truncate_cells(s: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Human-readable byte count: `843` → `843 B`, `1500` → `1.5 KB`,
+/// `2_500_000` → `2.4 MB`. Used in the reading view's attachment list.
+fn format_bytes(bytes: u64) -> String {
+    const K: f64 = 1024.0;
+    let n = bytes as f64;
+    if n < K {
+        format!("{bytes} B")
+    } else if n < K * K {
+        format!("{:.1} KB", n / K)
+    } else if n < K * K * K {
+        format!("{:.1} MB", n / (K * K))
+    } else {
+        format!("{:.1} GB", n / (K * K * K))
+    }
 }
 
 fn pad_right(s: &str, width: usize) -> String {

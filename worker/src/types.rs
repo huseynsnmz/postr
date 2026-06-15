@@ -64,6 +64,10 @@ pub struct EmailMeta {
     /// `SUBSTR(body, 1, 300)` — only present on list rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// `true` when the email has at least one attachment row, lit by a
+    /// LEFT JOIN in `rpc_get_emails`. Drives the inbox `@` glyph.
+    #[serde(default)]
+    pub has_attachments: bool,
 }
 
 /// Full row returned by `GET /emails/:id` and `GET /threads/:threadId`.

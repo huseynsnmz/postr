@@ -69,6 +69,10 @@ pub struct EmailMeta {
     pub folder_id: Option<String>,
     #[serde(default)]
     pub snippet: Option<String>,
+    /// Worker-computed flag for the inbox `@` glyph. Optional because older
+    /// worker deploys don't populate it.
+    #[serde(default)]
+    pub has_attachments: bool,
 }
 
 /// Full `EmailFull` shape — list rows extended with body + attachments meta.

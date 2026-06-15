@@ -66,6 +66,9 @@ pub enum AppEvent {
     /// ReadingState can store it for routing per-message ops.
     ThreadLoaded(String, ThreadFull),
     ActionDone(String),
+    /// Same as ActionDone but without a flash — used by batch ops so the
+    /// per-row completion doesn't overwrite the batch summary.
+    ActionDoneQuiet,
     Error {
         kind: ErrorKind,
         message: String,
@@ -430,6 +433,9 @@ impl App {
                 self.state.flash_success(s);
                 // Refresh the inbox so the affected row reflects the new state.
                 // Uses the current scope (single or unified) automatically.
+                self.spawn_load_inbox();
+            }
+            AppEvent::ActionDoneQuiet => {
                 self.spawn_load_inbox();
             }
             AppEvent::Error { kind, message } => match kind {
@@ -970,9 +976,26 @@ impl App {
                     self.state.selected_index = idx;
                 }
             }
+            // Space toggles multi-selection on the highlighted row.
+            KeyCode::Char(' ') => {
+                if let Some(m) = self.state.selected_meta().cloned() {
+                    let id = m.meta.id;
+                    if self.state.multi_selected.remove(&id).is_none() {
+                        self.state.multi_selected.insert(id, m.mailbox_id);
+                    }
+                    self.state.selected_next();
+                }
+            }
+            // Esc clears the multi-selection. (Inbox has no other Esc binding.)
+            KeyCode::Esc if !self.state.multi_selected.is_empty() => {
+                self.state.multi_selected.clear();
+                self.state.flash_info("Selection cleared");
+            }
             KeyCode::Enter => self.spawn_open_selected(),
             KeyCode::Char('s') => {
-                if let Some(m) = self.state.selected_meta().cloned() {
+                if !self.state.multi_selected.is_empty() {
+                    self.batch_toggle_star();
+                } else if let Some(m) = self.state.selected_meta().cloned() {
                     let new_val = !m.meta.starred;
                     if let Some(row) = self.state.messages.get_mut(self.state.selected_index) {
                         row.meta.starred = new_val;
@@ -981,12 +1004,16 @@ impl App {
                 }
             }
             KeyCode::Char('e') => {
-                if let Some(m) = self.state.selected_meta().cloned() {
+                if !self.state.multi_selected.is_empty() {
+                    self.batch_archive();
+                } else if let Some(m) = self.state.selected_meta().cloned() {
                     self.spawn_archive(m.meta.id, m.mailbox_id);
                 }
             }
             KeyCode::Char('d') => {
-                if let Some(m) = self.state.selected_meta().cloned() {
+                if !self.state.multi_selected.is_empty() {
+                    self.batch_delete();
+                } else if let Some(m) = self.state.selected_meta().cloned() {
                     self.arm_delete_confirm(m.meta.id, m.mailbox_id, false);
                 }
             }
@@ -1659,6 +1686,116 @@ impl App {
             self.state.mode = Mode::Inbox;
             self.state.reading = None;
         }
+    }
+
+    // ── Batch ops (apply over `multi_selected`) ─────────────────
+
+    fn drain_selection(&mut self) -> Vec<(String, String)> {
+        let out: Vec<(String, String)> = self
+            .state
+            .multi_selected
+            .iter()
+            .map(|(id, mb)| (id.clone(), mb.clone()))
+            .collect();
+        self.state.multi_selected.clear();
+        out
+    }
+
+    fn batch_archive(&mut self) {
+        let rows = self.drain_selection();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        for (email_id, mailbox_id) in rows {
+            self.spawn_archive_quiet(email_id, mailbox_id);
+        }
+        self.state.flash_success(format!("Archived {n} message(s)"));
+    }
+
+    fn batch_delete(&mut self) {
+        let rows = self.drain_selection();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        // Soft-delete from inbox/etc, hard-delete from inside trash. Match
+        // the single-row UX without a per-row confirm — the batch flash
+        // (and the row count) is the confirmation surface.
+        let permanent = self.state.folder.eq_ignore_ascii_case("trash");
+        for (email_id, mailbox_id) in rows {
+            if permanent {
+                self.spawn_delete_quiet(email_id, mailbox_id);
+            } else {
+                self.spawn_move_to_trash_quiet(email_id, mailbox_id);
+            }
+        }
+        self.state.flash_success(if permanent {
+            format!("Deleted {n} message(s)")
+        } else {
+            format!("Moved {n} message(s) to trash")
+        });
+    }
+
+    fn batch_toggle_star(&mut self) {
+        // Direction is decided by the currently-highlighted row's state —
+        // if it's starred we unstar everything, otherwise we star everything.
+        // Matches the way email clients usually batch the star action.
+        let direction = self
+            .state
+            .selected_meta()
+            .map(|m| !m.meta.starred)
+            .unwrap_or(true);
+        let rows = self.drain_selection();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        for (email_id, mailbox_id) in rows {
+            self.spawn_star_quiet(email_id, direction, mailbox_id);
+        }
+        self.state.flash_success(if direction {
+            format!("Starred {n} message(s)")
+        } else {
+            format!("Unstarred {n} message(s)")
+        });
+    }
+
+    // Quiet variants emit no per-op flash so the batch summary stays clean.
+    fn spawn_archive_quiet(&self, email_id: String, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = client.archive(&mailbox_id, &email_id).await;
+            let _ = tx.send(AppEvent::ActionDoneQuiet);
+        });
+    }
+
+    fn spawn_delete_quiet(&self, email_id: String, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = client.delete_email(&mailbox_id, &email_id).await;
+            let _ = tx.send(AppEvent::ActionDoneQuiet);
+        });
+    }
+
+    fn spawn_move_to_trash_quiet(&self, email_id: String, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = client.move_email(&mailbox_id, &email_id, "trash").await;
+            let _ = tx.send(AppEvent::ActionDoneQuiet);
+        });
+    }
+
+    fn spawn_star_quiet(&self, email_id: String, on: bool, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = client.star(&mailbox_id, &email_id, on).await;
+            let _ = tx.send(AppEvent::ActionDoneQuiet);
+        });
     }
 
     pub fn spawn_move_to_trash(&mut self, email_id: String, mailbox_id: String) {

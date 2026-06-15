@@ -93,10 +93,11 @@ pub struct TuiMessage {
 
 impl TuiMessage {
     pub fn from_meta(meta: EmailMeta, mailbox_id: String) -> Self {
+        let has_attachment = meta.has_attachments;
         Self {
             meta,
             mailbox_id,
-            has_attachment: false,
+            has_attachment,
             urgent: false,
         }
     }
@@ -354,6 +355,10 @@ pub struct AppState {
     /// `/switch` mailbox picker. `Some` while the centered overlay is open;
     /// resolved by `j/k/↑/↓` + `Enter` (or `Esc` to cancel).
     pub mailbox_picker: Option<MailboxPickerState>,
+    /// Multi-selected email rows keyed by their id, mapped to the owning
+    /// mailbox so unified-inbox batch ops still route per-row. Toggled with
+    /// space; `e`/`d`/`s` operate on the whole set when non-empty.
+    pub multi_selected: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -478,6 +483,7 @@ impl AppState {
             quit_armed: false,
             folder: "inbox".into(),
             folder_picker: None,
+            multi_selected: std::collections::HashMap::new(),
         }
     }
 
@@ -811,6 +817,7 @@ mod tests {
             thread_id: None,
             folder_id: Some("inbox".into()),
             snippet: None,
+            has_attachments: false,
         }
     }
 
