@@ -673,9 +673,13 @@ fn draw_reading_hint(frame: &mut Frame, area: Rect) {
 
 // ── Slash menu overlay ──────────────────────────────────────────────────────
 
-/// Render the slash-command popover **above** the input row, mirroring
-/// Claude Code's `PromptInputHelpMenu`. Only invoked when the prompt buffer
-/// starts with `/` (the caller checks).
+/// Render the slash-command hints **above** the input row as a flat list —
+/// no border, no popover box, no background fill. Mirrors Claude Code's
+/// `PromptInputHelpMenu`: each row is `name<pad>command · description`, and
+/// the whole list dissolves into the surrounding screen instead of floating
+/// in a windowed panel.
+///
+/// Only invoked when the prompt buffer starts with `/` (the caller checks).
 fn draw_command_menu(frame: &mut Frame, _app: &App, cmd: &CommandState, prior: PriorMode) {
     let area = frame.area();
 
@@ -688,127 +692,71 @@ fn draw_command_menu(frame: &mut Frame, _app: &App, cmd: &CommandState, prior: P
         PriorMode::Reading => area.y + area.height.saturating_sub(4),
     };
 
-    let max_w = area.width.saturating_sub(4).min(64);
-    let visible_rows = cmd.filtered.len() as u16;
-    let header = 2u16; // " COMMANDS" + blank
-    let footer = 4u16; // blank + "All commands" + names + footer hint
-    let desired_height = visible_rows + header + footer + 2;
+    if cmd.filtered.is_empty() {
+        return;
+    }
 
-    // Float UP from one row above the input. Clamp to the top of the screen.
+    let rows = cmd.filtered.len() as u16;
     let bottom_y = input_top.saturating_sub(1);
-    let mut top_y = bottom_y.saturating_sub(desired_height.saturating_sub(1));
+    let mut top_y = bottom_y.saturating_sub(rows.saturating_sub(1));
     if top_y < area.y {
         top_y = area.y;
     }
     let height = bottom_y.saturating_sub(top_y).saturating_add(1);
-    let popover = Rect {
-        x: area.x + 2,
+    let list_area = Rect {
+        x: area.x + 1,
         y: top_y,
-        width: max_w,
+        width: area.width.saturating_sub(2),
         height,
     };
-    frame.render_widget(Clear, popover);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::HAIRLINE))
-        .style(Style::default().bg(theme::RECESSED_WELL));
-    let inner = block.inner(popover);
-    frame.render_widget(block, popover);
+    // Two-column layout: `/name` left-aligned, "command · desc" after a
+    // gutter. Width tuned to the longest existing command name + a couple
+    // of cells of breathing room.
+    let name_col_w = SLASH_COMMANDS
+        .iter()
+        .map(|c| c.name.len() + 1) // +1 for the leading '/'
+        .max()
+        .unwrap_or(12)
+        + 4;
 
-    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
-    let signal_bold = Style::default()
-        .fg(theme::SIGNAL_LIGHT)
-        .bg(theme::RECESSED_WELL)
-        .add_modifier(Modifier::BOLD);
-    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+    let muted = Style::default().fg(theme::MUTED);
+    let text = Style::default().fg(theme::TEXT);
+    let phase5 = Style::default().fg(theme::FAINT);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
-    lines.push(Line::from(Span::styled("  COMMANDS", muted)));
+    let lines: Vec<Line> = cmd
+        .filtered
+        .iter()
+        .enumerate()
+        .map(|(i, &cmd_idx)| {
+            let sc = SLASH_COMMANDS[cmd_idx];
+            let selected = i == cmd.selected;
+            let name_style = if sc.status == CmdStatus::Phase5 {
+                phase5
+            } else if selected {
+                text.add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            };
+            let desc_style = if sc.status == CmdStatus::Phase5 {
+                phase5
+            } else if selected {
+                text
+            } else {
+                muted
+            };
 
-    for (i, &cmd_idx) in cmd.filtered.iter().enumerate() {
-        let sc = SLASH_COMMANDS[cmd_idx];
-        let selected = i == cmd.selected;
-        let row_bg = if selected {
-            theme::ROW_SELECT
-        } else {
-            theme::RECESSED_WELL
-        };
-        let bar = if selected { "▌" } else { " " };
-        let bar_span = Span::styled(
-            bar.to_string(),
-            Style::default()
-                .fg(theme::SIGNAL_LIGHT)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD),
-        );
-
-        let name_style = if sc.status == CmdStatus::Phase5 {
-            Style::default()
-                .fg(theme::MUTED)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme::SIGNAL_LIGHT)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD)
-        };
-        let desc_style = if sc.status == CmdStatus::Phase5 {
-            Style::default().fg(theme::MUTED).bg(row_bg)
-        } else {
-            Style::default().fg(theme::TEXT).bg(row_bg)
-        };
-
-        let name = format!(" /{name:<11}", name = sc.name);
-        lines.push(
+            let name = format!("/{:<w$}", sc.name, w = name_col_w - 1);
             Line::from(vec![
-                bar_span,
                 Span::styled(name, name_style),
+                Span::styled("command ", muted),
+                Span::styled("· ", muted),
                 Span::styled(sc.desc.to_string(), desc_style),
             ])
-            .style(Style::default().bg(row_bg)),
-        );
-    }
+        })
+        .collect();
 
-    if (lines.len() as u16) + 4 <= inner.height {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("  All commands", muted)));
-        let all_names: Vec<String> = SLASH_COMMANDS
-            .iter()
-            .map(|c| format!("/{}", c.name))
-            .collect();
-        let joined = all_names.join("  ");
-        let wrap_w = (inner.width as usize).saturating_sub(2).max(10);
-        for chunk in textwrap::wrap(&joined, wrap_w) {
-            lines.push(Line::from(vec![
-                Span::styled("  ", muted),
-                Span::styled(chunk.into_owned(), signal_bold),
-            ]));
-        }
-    }
-
-    // Footer.
-    let footer_line = Line::from(vec![
-        Span::styled(" ", muted),
-        Span::styled("↑↓", text.add_modifier(Modifier::BOLD)),
-        Span::styled(" select   ", muted),
-        Span::styled("⏎", text.add_modifier(Modifier::BOLD)),
-        Span::styled(" run   ", muted),
-        Span::styled("esc", text.add_modifier(Modifier::BOLD)),
-        Span::styled(" dismiss", muted),
-    ]);
-    // Pad to push footer to bottom.
-    while (lines.len() as u16) + 1 < inner.height {
-        lines.push(Line::from(""));
-    }
-    lines.push(footer_line);
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines), list_area);
 }
 
 // ── Compose screen ──────────────────────────────────────────────────────────
