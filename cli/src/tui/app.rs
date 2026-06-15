@@ -404,12 +404,14 @@ impl App {
             AppEvent::MailboxesLoaded(list) => {
                 if let Some(picker) = self.state.mailbox_picker.as_mut() {
                     picker.loading = false;
-                    let cur = &self.mailbox_id;
-                    picker.selected = list
-                        .iter()
-                        .position(|m| m.id.eq_ignore_ascii_case(cur))
-                        .unwrap_or(0);
+                    let cur = self.mailbox_id.clone();
                     picker.mailboxes = list;
+                    picker.refilter();
+                    picker.selected = picker
+                        .filtered
+                        .iter()
+                        .position(|&i| picker.mailboxes[i].id.eq_ignore_ascii_case(&cur))
+                        .unwrap_or(0);
                 }
             }
         }
@@ -1351,32 +1353,32 @@ impl App {
         );
     }
 
-    /// `/switch <addr>` directly swaps the active mailbox; `/switch` (no args)
-    /// opens a picker; `/switch all` is the unified-inbox stub.
+    /// `/switch <addr>` swaps directly when `<addr>` is a full email; for any
+    /// other token (an alias or fragment) the picker opens pre-filtered to
+    /// that string so fuzzy match resolves it. `/switch all` is the
+    /// unified-inbox stub.
     fn run_switch(&mut self, args: &str) {
         let arg = args.trim();
         if arg.eq_ignore_ascii_case("all") {
             self.state
                 .flash_info("Unified inbox lands next — pick a single mailbox for now");
-            self.open_mailbox_picker();
+            self.open_mailbox_picker_with_query("");
             return;
         }
-        if !arg.is_empty() {
+        if arg.contains('@') {
             let target = arg.to_lowercase();
-            if let Err(e) = self.set_active_mailbox(target.clone(), None) {
+            if let Err(e) = self.set_active_mailbox(target, None) {
                 self.state.flash_error(format!("Switch failed: {e}"));
             }
             return;
         }
-        self.open_mailbox_picker();
+        self.open_mailbox_picker_with_query(arg);
     }
 
-    fn open_mailbox_picker(&mut self) {
-        self.state.mailbox_picker = Some(crate::state::MailboxPickerState {
-            mailboxes: Vec::new(),
-            selected: 0,
-            loading: true,
-        });
+    fn open_mailbox_picker_with_query(&mut self, query: &str) {
+        let mut picker = crate::state::MailboxPickerState::new();
+        picker.query = query.to_string();
+        self.state.mailbox_picker = Some(picker);
         self.spawn_load_mailboxes();
     }
 
@@ -1385,7 +1387,7 @@ impl App {
     }
 
     fn handle_key_mailbox_picker(&mut self, key: KeyEvent) {
-        // Pull the selection out so we don't hold a borrow across self.* calls.
+        // Pull the chosen mailbox out so we don't hold a borrow across self.*.
         let chosen = {
             let Some(picker) = self.state.mailbox_picker.as_mut() else {
                 return;
@@ -1396,35 +1398,59 @@ impl App {
                 }
                 return;
             }
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => {
                     self.close_mailbox_picker();
                     return;
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !picker.mailboxes.is_empty() {
-                        picker.selected = (picker.selected + 1) % picker.mailboxes.len();
+                KeyCode::Down => {
+                    if !picker.filtered.is_empty() {
+                        picker.selected = (picker.selected + 1) % picker.filtered.len();
                     }
                     return;
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !picker.mailboxes.is_empty() {
+                KeyCode::Up => {
+                    if !picker.filtered.is_empty() {
                         picker.selected = if picker.selected == 0 {
-                            picker.mailboxes.len() - 1
+                            picker.filtered.len() - 1
                         } else {
                             picker.selected - 1
                         };
                     }
                     return;
                 }
-                KeyCode::Char(ch @ '1'..='9') => {
-                    let idx = (ch as u8 - b'1') as usize;
-                    if idx < picker.mailboxes.len() {
-                        picker.selected = idx;
+                // Ctrl+N/P as arrow-key aliases for keyboards that swap them.
+                KeyCode::Char('n') if ctrl => {
+                    if !picker.filtered.is_empty() {
+                        picker.selected = (picker.selected + 1) % picker.filtered.len();
                     }
                     return;
                 }
-                KeyCode::Enter => picker.mailboxes.get(picker.selected).cloned(),
+                KeyCode::Char('p') if ctrl => {
+                    if !picker.filtered.is_empty() {
+                        picker.selected = if picker.selected == 0 {
+                            picker.filtered.len() - 1
+                        } else {
+                            picker.selected - 1
+                        };
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop();
+                    picker.refilter();
+                    return;
+                }
+                KeyCode::Char(ch) if !ctrl => {
+                    picker.query.push(ch);
+                    picker.refilter();
+                    return;
+                }
+                KeyCode::Enter => picker
+                    .filtered
+                    .get(picker.selected)
+                    .and_then(|&i| picker.mailboxes.get(i).cloned()),
                 _ => return,
             }
         };

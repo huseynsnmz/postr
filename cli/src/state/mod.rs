@@ -340,6 +340,52 @@ pub struct MailboxPickerState {
     pub selected: usize,
     /// `true` while the initial `/cli/me` round-trip is still in flight.
     pub loading: bool,
+    /// Free-text filter; substring-matched against address, alias, and
+    /// display name (all case-insensitive).
+    pub query: String,
+    /// Indices into `mailboxes` that match `query`. Empty `query` ⇒ all.
+    pub filtered: Vec<usize>,
+}
+
+impl Default for MailboxPickerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MailboxPickerState {
+    pub fn new() -> Self {
+        Self {
+            mailboxes: Vec::new(),
+            selected: 0,
+            loading: true,
+            query: String::new(),
+            filtered: Vec::new(),
+        }
+    }
+
+    /// Recompute `filtered` from the current `query`. Idempotent.
+    pub fn refilter(&mut self) {
+        let q = self.query.trim().to_lowercase();
+        self.filtered = self
+            .mailboxes
+            .iter()
+            .enumerate()
+            .filter(|(_, mb)| {
+                if q.is_empty() {
+                    return true;
+                }
+                let addr = mb.address.to_lowercase();
+                let alias = mb.alias.as_deref().unwrap_or("").to_lowercase();
+                let name = mb.display_name.as_deref().unwrap_or("").to_lowercase();
+                addr.contains(&q) || alias.contains(&q) || name.contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

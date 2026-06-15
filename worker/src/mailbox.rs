@@ -10,13 +10,18 @@ use worker::*;
 
 use crate::types::MailboxBrief;
 
-/// Body of `mailboxes/{address}.json` in R2. `display_name` was added
-/// after v1 — older objects parse fine because the field is optional.
+/// Body of `mailboxes/{address}.json` in R2. `display_name` and `alias`
+/// were added after v1 — older objects parse fine because both fields are
+/// optional.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MailboxRecord {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Short handle used by `/switch <alias>` in the TUI; doesn't affect
+    /// outbound mail. Unique per worker (enforced by callers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 /// Normalize a path-parameter mailbox id: percent-decode, then lowercase.
@@ -87,12 +92,14 @@ pub async fn load_record(env: &Env, mailbox_id: &str) -> Result<Option<MailboxRe
         return Ok(Some(MailboxRecord {
             address,
             display_name: None,
+            alias: None,
         }));
     };
     let bytes = body.bytes().await?;
     let rec: MailboxRecord = serde_json::from_slice(&bytes).unwrap_or(MailboxRecord {
         address: address.clone(),
         display_name: None,
+        alias: None,
     });
     Ok(Some(rec))
 }
@@ -129,24 +136,27 @@ pub async fn list_mailboxes(env: &Env) -> Result<Vec<MailboxBrief>> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        // Best-effort fetch of the body for the display_name; if it fails
-        // or the object is empty we still surface the mailbox without a name.
-        let display_name = match bucket.get(&key).execute().await {
+        // Best-effort fetch of the body for the display_name + alias; if it
+        // fails or the object is empty we still surface the mailbox bare.
+        let rec = match bucket.get(&key).execute().await {
             Ok(Some(obj)) => match obj.body() {
                 Some(body) => body
                     .bytes()
                     .await
                     .ok()
-                    .and_then(|bytes| serde_json::from_slice::<MailboxRecord>(&bytes).ok())
-                    .and_then(|rec| rec.display_name),
+                    .and_then(|bytes| serde_json::from_slice::<MailboxRecord>(&bytes).ok()),
                 None => None,
             },
             _ => None,
         };
+        let (display_name, alias) = rec
+            .map(|r| (r.display_name, r.alias))
+            .unwrap_or((None, None));
         out.push(MailboxBrief {
             id: email.clone(),
             address: email,
             display_name,
+            alias,
         });
     }
     Ok(out)

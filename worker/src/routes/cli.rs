@@ -40,11 +40,17 @@ fn brief(rec: &MailboxRecord) -> MailboxBrief {
         id: rec.address.clone(),
         address: rec.address.clone(),
         display_name: rec.display_name.clone(),
+        alias: rec.alias.clone(),
     }
 }
 
 fn normalize_display_name(raw: Option<String>) -> Option<String> {
     raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn normalize_alias(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
 }
 
 /// `POST /api/v1/cli/mailboxes` — idempotent mailbox creation.
@@ -62,6 +68,8 @@ pub async fn create_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
         address: String,
         #[serde(default)]
         display_name: Option<String>,
+        #[serde(default)]
+        alias: Option<String>,
     }
 
     let body: Body = match req.json().await {
@@ -81,6 +89,7 @@ pub async fn create_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
             MailboxRecord {
                 address: address.clone(),
                 display_name: normalize_display_name(body.display_name),
+                alias: normalize_alias(body.alias),
             },
             201,
         ),
@@ -110,6 +119,8 @@ pub async fn update_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
         // Tri-state: omit → leave unchanged; `null` → clear; string → set.
         #[serde(default, deserialize_with = "deserialize_some")]
         display_name: Option<Option<String>>,
+        #[serde(default, deserialize_with = "deserialize_some")]
+        alias: Option<Option<String>>,
     }
 
     let body: Body = match req.json().await {
@@ -123,6 +134,9 @@ pub async fn update_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
 
     if let Some(field) = body.display_name {
         rec.display_name = normalize_display_name(field);
+    }
+    if let Some(field) = body.alias {
+        rec.alias = normalize_alias(field);
     }
     mailbox::save_record(&ctx.env, &rec).await?;
     Response::from_json(&brief(&rec))

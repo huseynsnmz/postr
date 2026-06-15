@@ -29,6 +29,9 @@ pub struct MailboxBrief {
     /// `"Hüseyin Sönmez" <me@x.com>`. None ⇒ bare address.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Short handle for `/switch <alias>` lookups in the TUI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 // ── Email rows (list + single) ─────────────────────────────────────

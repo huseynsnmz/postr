@@ -27,6 +27,9 @@ pub struct CliMailbox {
     /// `"Hüseyin Sönmez" <me@x.com>`. None ⇒ bare address.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Short handle for `/switch <alias>` in the TUI.
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 // ── /api/v1/mailboxes ──────────────────────────────────────────────

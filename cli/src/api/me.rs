@@ -11,45 +11,64 @@ impl ApiClient {
     }
 
     /// Idempotent — creating the same address twice returns the existing one.
-    /// `display_name` is only honored on the *first* create call; later updates
-    /// must go through [`update_mailbox`].
+    /// `display_name` and `alias` are only honored on the *first* create call;
+    /// later updates must go through [`update_mailbox`].
     pub async fn create_mailbox(
         &self,
         address: &str,
         display_name: Option<&str>,
+        alias: Option<&str>,
     ) -> Result<CliMailbox, ApiError> {
         #[derive(Serialize)]
         struct Body<'a> {
             address: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             display_name: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            alias: Option<&'a str>,
         }
         self.post_json(
             "/api/v1/cli/mailboxes",
             &Body {
                 address,
                 display_name,
+                alias,
             },
         )
         .await
     }
 
-    /// Tri-state on `display_name`:
-    ///   * `Some(Some(s))` — set the name
-    ///   * `Some(None)`    — clear the name
+    /// Tri-state on every field:
+    ///   * `Some(Some(s))` — set the value
+    ///   * `Some(None)`    — clear the value
     ///   * `None`          — leave unchanged
     pub async fn update_mailbox(
         &self,
         address: &str,
         display_name: Option<Option<&str>>,
+        alias: Option<Option<&str>>,
     ) -> Result<CliMailbox, ApiError> {
-        let body = match display_name {
-            Some(Some(name)) => json!({ "display_name": name }),
-            Some(None) => json!({ "display_name": null }),
-            None => json!({}),
-        };
+        let mut body = serde_json::Map::new();
+        match display_name {
+            Some(Some(name)) => {
+                body.insert("display_name".into(), json!(name));
+            }
+            Some(None) => {
+                body.insert("display_name".into(), serde_json::Value::Null);
+            }
+            None => {}
+        }
+        match alias {
+            Some(Some(a)) => {
+                body.insert("alias".into(), json!(a));
+            }
+            Some(None) => {
+                body.insert("alias".into(), serde_json::Value::Null);
+            }
+            None => {}
+        }
         let path = format!("/api/v1/cli/mailboxes/{}", mailbox_path_segment(address));
-        self.put_json(&path, &body).await
+        self.put_json(&path, &serde_json::Value::Object(body)).await
     }
 
     pub async fn delete_mailbox(&self, address: &str) -> Result<(), ApiError> {

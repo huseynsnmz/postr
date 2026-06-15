@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
+use chrono::{DateTime, Local};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -72,8 +72,10 @@ fn draw_mailbox_picker(
 ) {
     let area = frame.area();
     let w = 60u16.min(area.width.saturating_sub(4));
-    let visible_rows = picker.mailboxes.len().max(1) as u16;
-    let h = (visible_rows + 4).min(area.height.saturating_sub(2));
+    let visible_rows = picker.filtered.len().max(1) as u16;
+    // +6 for: top border + filter row + filter separator + bottom hint row +
+    // bottom blank line + bottom border.
+    let h = (visible_rows + 6).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let panel = Rect {
@@ -104,6 +106,21 @@ fn draw_mailbox_picker(
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line> = Vec::new();
+    // Filter input echo.
+    lines.push(Line::from(vec![
+        Span::styled(" › ", signal_bold),
+        Span::styled(picker.query.clone(), text.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if picker.query.is_empty() {
+                "type to filter…".to_string()
+            } else {
+                String::new()
+            },
+            muted,
+        ),
+    ]));
+    lines.push(Line::from(""));
+
     if picker.loading {
         lines.push(Line::from(Span::styled(" Loading…", muted)));
     } else if picker.mailboxes.is_empty() {
@@ -113,9 +130,12 @@ fn draw_mailbox_picker(
             Span::styled(" Add one with ", muted),
             Span::styled("postr mailbox add <addr>", signal_bold),
         ]));
+    } else if picker.filtered.is_empty() {
+        lines.push(Line::from(Span::styled(" No matches.", muted)));
     } else {
-        for (i, mb) in picker.mailboxes.iter().enumerate() {
-            let selected = i == picker.selected;
+        for (row_i, &mb_idx) in picker.filtered.iter().enumerate() {
+            let mb = &picker.mailboxes[mb_idx];
+            let selected = row_i == picker.selected;
             let active = mb.id.eq_ignore_ascii_case(current);
             let row_bg = if selected {
                 theme::ROW_SELECT
@@ -130,8 +150,14 @@ fn draw_mailbox_picker(
                     .bg(row_bg)
                     .add_modifier(Modifier::BOLD),
             );
-            let addr = format!(" {}", mb.address);
-            let addr_style = if selected {
+            let alias = mb
+                .alias
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|a| format!("[{a}] "))
+                .unwrap_or_default();
+            let line_text = format!(" {alias}{}", mb.address);
+            let line_style = if selected {
                 signal_bold.bg(row_bg)
             } else {
                 text.bg(row_bg)
@@ -145,7 +171,7 @@ fn draw_mailbox_picker(
             lines.push(
                 Line::from(vec![
                     bar_span,
-                    Span::styled(addr, addr_style),
+                    Span::styled(line_text, line_style),
                     Span::styled(suffix, muted.bg(row_bg)),
                 ])
                 .style(Style::default().bg(row_bg)),
@@ -422,8 +448,8 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
     const W_MARKER: usize = 2;
     const W_NUMBER: usize = 3;
     const W_GLYPH: usize = 2;
-    // chrono's widest format we emit (`%b %-d`) hits 6 cells (`Jun 15`).
-    const W_TIME: usize = 6;
+    // chrono's `%b %d %H:%M` always emits 12 cells, e.g. `Jun 15 20:56`.
+    const W_TIME: usize = 12;
     // 1-cell gutter between subject and time.
     const TIME_GUTTER: usize = 1;
     // Give the sender enough room for typical email locals before truncating;
@@ -1946,6 +1972,11 @@ fn vertical_center(area: Rect, h: u16) -> Rect {
     }
 }
 
+/// Format an incoming RFC 3339 / 2822 timestamp as a fixed-width
+/// `MMM DD HH:MM` string in local time (12 cells wide). Always emits both
+/// the date and the time so the inbox is unambiguous at a glance — the
+/// previous "today→HH:MM, week→%a, older→%b %-d" relative format dropped
+/// information users couldn't easily recover.
 fn format_time(date: &str) -> String {
     let parsed: Option<DateTime<Local>> = DateTime::parse_from_rfc3339(date)
         .ok()
@@ -1958,19 +1989,7 @@ fn format_time(date: &str) -> String {
     let Some(dt) = parsed else {
         return date.to_string();
     };
-    let now = Local::now();
-    let today = Local
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single();
-    if let Some(today_start) = today {
-        if dt >= today_start {
-            return dt.format("%H:%M").to_string();
-        }
-    }
-    if now.signed_duration_since(dt) < Duration::days(7) {
-        return dt.format("%a").to_string();
-    }
-    dt.format("%b %-d").to_string()
+    dt.format("%b %d %H:%M").to_string()
 }
 
 fn truncate_cells(s: &str, max: usize) -> String {

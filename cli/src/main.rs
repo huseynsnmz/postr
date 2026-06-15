@@ -41,17 +41,27 @@ enum MailboxCmd {
         /// Personal name attached to outbound `From:` headers
         #[arg(long)]
         name: Option<String>,
+        /// Short alias for `/switch <alias>` in the TUI (e.g. "work")
+        #[arg(long)]
+        alias: Option<String>,
     },
-    /// Update mailbox metadata. Currently only the display name is mutable.
+    /// Update mailbox metadata. Currently the display name and alias are
+    /// mutable; the address itself isn't.
     Update {
         /// Email address of the mailbox to update
         address: String,
-        /// New display name. Use `--clear-name` to remove the name instead.
+        /// New display name. Use `--clear-name` to remove it instead.
         #[arg(long, conflicts_with = "clear_name")]
         name: Option<String>,
         /// Clear the display name so outbound mail uses the bare address.
         #[arg(long)]
         clear_name: bool,
+        /// New alias for `/switch` lookups. Use `--clear-alias` to remove.
+        #[arg(long, conflicts_with = "clear_alias")]
+        alias: Option<String>,
+        /// Clear the alias.
+        #[arg(long)]
+        clear_alias: bool,
     },
     /// List all mailboxes known to the worker.
     List,
@@ -73,12 +83,18 @@ async fn main() -> Result<()> {
         Cmd::Login { url, token } => login(url, token).await,
         Cmd::Logout => logout(),
         Cmd::Whoami => whoami().await,
-        Cmd::Mailbox(MailboxCmd::Add { address, name }) => mailbox_add(address, name).await,
+        Cmd::Mailbox(MailboxCmd::Add {
+            address,
+            name,
+            alias,
+        }) => mailbox_add(address, name, alias).await,
         Cmd::Mailbox(MailboxCmd::Update {
             address,
             name,
             clear_name,
-        }) => mailbox_update(address, name, clear_name).await,
+            alias,
+            clear_alias,
+        }) => mailbox_update(address, name, clear_name, alias, clear_alias).await,
         Cmd::Mailbox(MailboxCmd::List) => mailbox_list().await,
         Cmd::Mailbox(MailboxCmd::Remove { address }) => mailbox_remove(address).await,
         Cmd::Tui => tui_entry().await,
@@ -152,16 +168,22 @@ fn require_session() -> Result<(Config, ApiClient)> {
 }
 
 fn format_name(mb: &postr::api::types::CliMailbox) -> String {
+    let alias = mb
+        .alias
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|a| format!(" [{a}]"))
+        .unwrap_or_default();
     match mb.display_name.as_deref().filter(|s| !s.is_empty()) {
-        Some(n) => format!("{} <{}>", n, mb.address),
-        None => mb.address.clone(),
+        Some(n) => format!("{} <{}>{alias}", n, mb.address),
+        None => format!("{}{alias}", mb.address),
     }
 }
 
-async fn mailbox_add(address: String, name: Option<String>) -> Result<()> {
+async fn mailbox_add(address: String, name: Option<String>, alias: Option<String>) -> Result<()> {
     let (mut cfg, client) = require_session()?;
     let mb = client
-        .create_mailbox(&address, name.as_deref())
+        .create_mailbox(&address, name.as_deref(), alias.as_deref())
         .await
         .context("creating mailbox")?;
     println!("Mailbox: {}", format_name(&mb));
@@ -176,17 +198,33 @@ async fn mailbox_add(address: String, name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn mailbox_update(address: String, name: Option<String>, clear_name: bool) -> Result<()> {
+async fn mailbox_update(
+    address: String,
+    name: Option<String>,
+    clear_name: bool,
+    alias: Option<String>,
+    clear_alias: bool,
+) -> Result<()> {
     let (_, client) = require_session()?;
-    let display = match (name, clear_name) {
-        (None, false) => return Err(anyhow!("nothing to update — pass --name or --clear-name")),
+    let display_payload = match (name, clear_name) {
+        (None, false) => None,
         (None, true) => Some(None),
         (Some(n), _) => Some(Some(n)),
     };
-    // `display` is Some(...) by construction above, so the as_deref nests safely.
-    let payload = display.as_ref().map(|inner| inner.as_deref());
+    let alias_payload = match (alias, clear_alias) {
+        (None, false) => None,
+        (None, true) => Some(None),
+        (Some(a), _) => Some(Some(a)),
+    };
+    if display_payload.is_none() && alias_payload.is_none() {
+        return Err(anyhow!(
+            "nothing to update — pass --name/--clear-name or --alias/--clear-alias"
+        ));
+    }
+    let display_ref = display_payload.as_ref().map(|inner| inner.as_deref());
+    let alias_ref = alias_payload.as_ref().map(|inner| inner.as_deref());
     let mb = client
-        .update_mailbox(&address, payload)
+        .update_mailbox(&address, display_ref, alias_ref)
         .await
         .context("updating mailbox")?;
     println!("Updated: {}", format_name(&mb));
