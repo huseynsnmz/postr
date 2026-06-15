@@ -89,6 +89,9 @@ pub enum AppEvent {
     /// Periodic tick so the feedback line can clear itself after its TTL
     /// elapses without polling per-render.
     FeedbackExpired,
+    /// `/switch` opened the picker; the background `/cli/me` round-trip
+    /// returned with the current mailbox list.
+    MailboxesLoaded(Vec<crate::api::types::CliMailbox>),
 }
 
 pub struct App {
@@ -97,6 +100,7 @@ pub struct App {
     pub client: Arc<ApiClient>,
     pub mailbox_id: String,
     pub tx: UnboundedSender<AppEvent>,
+    pub cfg: Config,
     /// Transient context captured at `/summarize` spawn-time so the result
     /// arm can wire up Compose-Reply without re-reading `ReadingState`
     /// (which the user may have closed). Tuple is
@@ -105,7 +109,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(client: Arc<ApiClient>, account: Account, tx: UnboundedSender<AppEvent>) -> Self {
+    pub fn new(
+        client: Arc<ApiClient>,
+        account: Account,
+        cfg: Config,
+        tx: UnboundedSender<AppEvent>,
+    ) -> Self {
         let mailbox_id = account.mailbox_id.clone();
         Self {
             state: AppState::empty(account),
@@ -113,11 +122,65 @@ impl App {
             client,
             mailbox_id,
             tx,
+            cfg,
             summarize_context: None,
         }
     }
 
     // ── Background spawns ────────────────────────────────────────
+
+    pub fn spawn_load_mailboxes(&self) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.me().await {
+                Ok(me) => {
+                    let _ = tx.send(AppEvent::MailboxesLoaded(me.mailboxes));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: format!("mailboxes: {e}"),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Switch the active mailbox at runtime: update state, persist the
+    /// config, and reload the inbox. Idempotent if `new_id` matches the
+    /// current mailbox.
+    pub fn set_active_mailbox(
+        &mut self,
+        new_id: String,
+        display_name: Option<String>,
+    ) -> anyhow::Result<()> {
+        if new_id == self.mailbox_id {
+            return Ok(());
+        }
+        self.mailbox_id = new_id.clone();
+        self.state.account.mailbox_id = new_id.clone();
+        self.state.account.email = new_id.clone();
+        self.state.account.unread_count = 0;
+        self.state.account.total_count = 0;
+        self.state.account.last_synced = "—".into();
+        self.state.messages.clear();
+        self.state.selected_index = 0;
+        self.state.more_count = 0;
+        self.state.reading = None;
+        self.state.mode = Mode::Loading(LoadingKind::Inbox);
+        self.cfg.default_mailbox_id = Some(new_id.clone());
+        self.cfg.email = Some(new_id);
+        self.cfg.save()?;
+        let label = display_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|n| format!("{n} <{}>", self.mailbox_id))
+            .unwrap_or_else(|| self.mailbox_id.clone());
+        self.state.flash_info(format!("Switched to {label}"));
+        self.spawn_load_inbox();
+        Ok(())
+    }
 
     pub fn spawn_load_inbox(&self) {
         let client = self.client.clone();
@@ -338,6 +401,17 @@ impl App {
                 self.state.clear_feedback_if_expired();
                 self.state.clear_undo_if_expired();
             }
+            AppEvent::MailboxesLoaded(list) => {
+                if let Some(picker) = self.state.mailbox_picker.as_mut() {
+                    picker.loading = false;
+                    let cur = &self.mailbox_id;
+                    picker.selected = list
+                        .iter()
+                        .position(|m| m.id.eq_ignore_ascii_case(cur))
+                        .unwrap_or(0);
+                    picker.mailboxes = list;
+                }
+            }
         }
     }
 
@@ -487,6 +561,12 @@ impl App {
         // Ctrl+C is always a hard exit, even from compose/menu.
         if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
+            return;
+        }
+        // The mailbox picker, when open, eats every key so the user can't
+        // accidentally interact with the screen behind it.
+        if self.state.mailbox_picker.is_some() {
+            self.handle_key_mailbox_picker(key);
             return;
         }
         // Bare `q` only quits when we're not in a typing-mode (compose,
@@ -1176,6 +1256,7 @@ impl App {
                 self.state.flash_info("Refreshing…");
                 self.spawn_load_inbox();
             }
+            "switch" => self.run_switch(args),
             "logout" => {
                 self.should_quit = true;
             }
@@ -1270,6 +1351,91 @@ impl App {
         );
     }
 
+    /// `/switch <addr>` directly swaps the active mailbox; `/switch` (no args)
+    /// opens a picker; `/switch all` is the unified-inbox stub.
+    fn run_switch(&mut self, args: &str) {
+        let arg = args.trim();
+        if arg.eq_ignore_ascii_case("all") {
+            self.state
+                .flash_info("Unified inbox lands next — pick a single mailbox for now");
+            self.open_mailbox_picker();
+            return;
+        }
+        if !arg.is_empty() {
+            let target = arg.to_lowercase();
+            if let Err(e) = self.set_active_mailbox(target.clone(), None) {
+                self.state.flash_error(format!("Switch failed: {e}"));
+            }
+            return;
+        }
+        self.open_mailbox_picker();
+    }
+
+    fn open_mailbox_picker(&mut self) {
+        self.state.mailbox_picker = Some(crate::state::MailboxPickerState {
+            mailboxes: Vec::new(),
+            selected: 0,
+            loading: true,
+        });
+        self.spawn_load_mailboxes();
+    }
+
+    fn close_mailbox_picker(&mut self) {
+        self.state.mailbox_picker = None;
+    }
+
+    fn handle_key_mailbox_picker(&mut self, key: KeyEvent) {
+        // Pull the selection out so we don't hold a borrow across self.* calls.
+        let chosen = {
+            let Some(picker) = self.state.mailbox_picker.as_mut() else {
+                return;
+            };
+            if picker.loading {
+                if matches!(key.code, KeyCode::Esc) {
+                    self.close_mailbox_picker();
+                }
+                return;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    self.close_mailbox_picker();
+                    return;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !picker.mailboxes.is_empty() {
+                        picker.selected = (picker.selected + 1) % picker.mailboxes.len();
+                    }
+                    return;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !picker.mailboxes.is_empty() {
+                        picker.selected = if picker.selected == 0 {
+                            picker.mailboxes.len() - 1
+                        } else {
+                            picker.selected - 1
+                        };
+                    }
+                    return;
+                }
+                KeyCode::Char(ch @ '1'..='9') => {
+                    let idx = (ch as u8 - b'1') as usize;
+                    if idx < picker.mailboxes.len() {
+                        picker.selected = idx;
+                    }
+                    return;
+                }
+                KeyCode::Enter => picker.mailboxes.get(picker.selected).cloned(),
+                _ => return,
+            }
+        };
+        if let Some(mb) = chosen {
+            self.close_mailbox_picker();
+            if let Err(e) = self.set_active_mailbox(mb.id, mb.display_name) {
+                self.state.flash_error(format!("Switch failed: {e}"));
+            }
+        }
+    }
+
     fn current_target_id(&self) -> Option<String> {
         if let Some(r) = self.state.reading.as_ref() {
             return Some(r.thread[r.message_idx].id.clone());
@@ -1353,14 +1519,14 @@ async fn run_loop(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no default mailbox — run `postr login` again"))?;
     let account = Account {
-        email: cfg.email.unwrap_or_default(),
+        email: cfg.email.clone().unwrap_or(mailbox_id.clone()),
         unread_count: 0,
         total_count: 0,
         last_synced: "—".into(),
         mailbox_id,
     };
     let (tx, mut rx) = unbounded_channel::<AppEvent>();
-    let mut app = App::new(client, account, tx.clone());
+    let mut app = App::new(client, account, cfg, tx.clone());
     app.spawn_load_inbox();
 
     // Feedback expiry tick — pings every second so the flash line can clear

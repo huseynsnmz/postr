@@ -329,6 +329,17 @@ pub struct AppState {
     /// Pending destructive action awaiting `y` confirmation. Drawn as a
     /// small inline prompt at the bottom of the screen.
     pub pending_confirm: Option<PendingConfirm>,
+    /// `/switch` mailbox picker. `Some` while the centered overlay is open;
+    /// resolved by `j/k/↑/↓` + `Enter` (or `Esc` to cancel).
+    pub mailbox_picker: Option<MailboxPickerState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MailboxPickerState {
+    pub mailboxes: Vec<crate::api::types::CliMailbox>,
+    pub selected: usize,
+    /// `true` while the initial `/cli/me` round-trip is still in flight.
+    pub loading: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +367,7 @@ impl AppState {
             last_undoable: None,
             show_shortcuts: false,
             pending_confirm: None,
+            mailbox_picker: None,
         }
     }
 

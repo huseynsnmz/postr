@@ -58,6 +58,115 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.state.pending_confirm.is_some() {
         draw_confirm_overlay(frame);
     }
+    if let Some(picker) = app.state.mailbox_picker.as_ref() {
+        draw_mailbox_picker(frame, picker, &app.mailbox_id);
+    }
+}
+
+// ── Mailbox picker (/switch) ─────────────────────────────────────────────────
+
+fn draw_mailbox_picker(
+    frame: &mut Frame,
+    picker: &crate::state::MailboxPickerState,
+    current: &str,
+) {
+    let area = frame.area();
+    let w = 60u16.min(area.width.saturating_sub(4));
+    let visible_rows = picker.mailboxes.len().max(1) as u16;
+    let h = (visible_rows + 4).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let panel = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, panel);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .style(Style::default().bg(theme::RECESSED_WELL))
+        .title(Span::styled(
+            " SWITCH MAILBOX ",
+            Style::default().fg(theme::MUTED),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
+    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+    let signal_bold = Style::default()
+        .fg(theme::SIGNAL_LIGHT)
+        .bg(theme::RECESSED_WELL)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if picker.loading {
+        lines.push(Line::from(Span::styled(" Loading…", muted)));
+    } else if picker.mailboxes.is_empty() {
+        lines.push(Line::from(Span::styled(" No mailboxes registered.", muted)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(" Add one with ", muted),
+            Span::styled("postr mailbox add <addr>", signal_bold),
+        ]));
+    } else {
+        for (i, mb) in picker.mailboxes.iter().enumerate() {
+            let selected = i == picker.selected;
+            let active = mb.id.eq_ignore_ascii_case(current);
+            let row_bg = if selected {
+                theme::ROW_SELECT
+            } else {
+                theme::RECESSED_WELL
+            };
+            let bar = if selected { "▌" } else { " " };
+            let bar_span = Span::styled(
+                bar.to_string(),
+                Style::default()
+                    .fg(theme::SIGNAL_LIGHT)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let addr = format!(" {}", mb.address);
+            let addr_style = if selected {
+                signal_bold.bg(row_bg)
+            } else {
+                text.bg(row_bg)
+            };
+            let suffix = match (&mb.display_name, active) {
+                (Some(n), true) if !n.is_empty() => format!("  ({n}) · active"),
+                (Some(n), false) if !n.is_empty() => format!("  ({n})"),
+                (_, true) => "  · active".to_string(),
+                _ => String::new(),
+            };
+            lines.push(
+                Line::from(vec![
+                    bar_span,
+                    Span::styled(addr, addr_style),
+                    Span::styled(suffix, muted.bg(row_bg)),
+                ])
+                .style(Style::default().bg(row_bg)),
+            );
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" ", muted),
+        Span::styled("↑↓", signal_bold),
+        Span::styled(" pick   ", muted),
+        Span::styled("⏎", signal_bold),
+        Span::styled(" switch   ", muted),
+        Span::styled("esc", signal_bold),
+        Span::styled(" cancel", muted),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
+        inner,
+    );
 }
 
 // ── Destructive-action confirm overlay ────────────────────────────────────────
