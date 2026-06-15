@@ -416,28 +416,32 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let total_w = inner.width as usize;
 
+    // Column widths — must stay in sync between the header and `row_line`
+    // because each column is fixed-width padded; mismatches show as visible
+    // step-changes between the header and the rows.
     const W_MARKER: usize = 2;
     const W_NUMBER: usize = 3;
-    const W_SENDER: usize = 16;
     const W_GLYPH: usize = 2;
+    // chrono's widest format we emit (`%b %-d`) hits 6 cells (`Jun 15`).
+    const W_TIME: usize = 6;
+    // 1-cell gutter between subject and time.
     const TIME_GUTTER: usize = 1;
+    // Give the sender enough room for typical email locals before truncating;
+    // when the terminal is narrow we clamp so subject always gets ≥ 18 cells.
+    let w_sender = compute_sender_width(total_w);
 
-    // Header row: # · Sender · Subject · Date. Same column widths as the
-    // data rows so they line up vertically.
+    let fixed = W_MARKER + W_NUMBER + w_sender + W_GLYPH + TIME_GUTTER + W_TIME;
+    let subject_w = total_w.saturating_sub(fixed);
+
     let muted = Style::default().fg(theme::MUTED);
-    let header = {
-        let time_w = "Date".len();
-        let fixed = W_MARKER + W_NUMBER + W_SENDER + W_GLYPH + TIME_GUTTER + time_w;
-        let subject_w = total_w.saturating_sub(fixed);
-        Line::from(vec![
-            Span::styled("  ", muted),
-            Span::styled(format!("{:>2} ", "#"), muted),
-            Span::styled(pad_right("Sender", W_SENDER), muted),
-            Span::styled("  ", muted),
-            Span::styled(pad_right("Subject", subject_w), muted),
-            Span::styled(" Date".to_string(), muted),
-        ])
-    };
+    let header = Line::from(vec![
+        Span::styled("  ", muted),
+        Span::styled(format!("{:>2} ", "#"), muted),
+        Span::styled(pad_right("Sender", w_sender), muted),
+        Span::styled("  ", muted),
+        Span::styled(pad_right("Subject", subject_w), muted),
+        Span::styled(format!(" {}", pad_right("Date", W_TIME)), muted),
+    ]);
 
     let take_n = (inner.height as usize).saturating_sub(1);
     let mut lines: Vec<Line> = Vec::with_capacity(take_n + 1);
@@ -456,14 +460,23 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
                     total_w,
                     W_MARKER,
                     W_NUMBER,
-                    W_SENDER,
+                    w_sender,
                     W_GLYPH,
                     TIME_GUTTER,
+                    W_TIME,
                 )
             }),
     );
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Sender column: roughly a quarter of the row, clamped to [16, 32] so the
+/// subject still gets a reasonable budget on narrow terminals and email
+/// addresses stop truncating on wide ones.
+fn compute_sender_width(total_w: usize) -> usize {
+    let quarter = total_w / 4;
+    quarter.clamp(16, 32)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,6 +490,7 @@ fn row_line(
     w_sender: usize,
     w_glyph: usize,
     time_gutter: usize,
+    w_time: usize,
 ) -> Line<'static> {
     let time_str = format_time(&msg.meta.date);
     let sender_str = if msg.meta.sender.trim().is_empty() {
@@ -491,8 +505,7 @@ fn row_line(
     };
     let unread = !msg.meta.read;
 
-    let time_w = UnicodeWidthStr::width(time_str.as_str()).max(1);
-    let fixed = w_marker + w_number + w_sender + w_glyph + time_gutter + time_w;
+    let fixed = w_marker + w_number + w_sender + w_glyph + time_gutter + w_time;
     let subject_w = total_w.saturating_sub(fixed);
 
     let row_bg = if selected {
@@ -562,8 +575,10 @@ fn row_line(
     };
     let subject_span = Span::styled(subj_padded, subj_style);
 
+    // Pad the time to W_TIME so the column lines up with the header.
+    let time_padded = pad_right(&time_str, w_time);
     let time_span = Span::styled(
-        format!(" {}", time_str),
+        format!(" {time_padded}"),
         apply_bg(Style::default().fg(theme::MUTED)),
     );
 
@@ -777,9 +792,7 @@ fn draw_reading(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // echo "› {n}"
-            Constraint::Length(1), // subject
-            Constraint::Length(1), // meta
-            Constraint::Length(1), // hairline
+            Constraint::Length(7), // HEADERS frame (border + 4-5 label rows + border)
             Constraint::Min(0),    // body
             Constraint::Length(1), // spacer
             Constraint::Length(1), // chips
@@ -807,61 +820,75 @@ fn draw_reading(frame: &mut Frame, app: &App) {
     ]);
     frame.render_widget(Paragraph::new(echo), chunks[0]);
 
+    // ── HEADERS frame ───────────────────────────────────────────────
+    let header_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .title(Span::styled(" HEADERS ", Style::default().fg(theme::MUTED)));
+    let header_inner = header_block.inner(chunks[1]);
+    frame.render_widget(header_block, chunks[1]);
+
+    let muted = Style::default().fg(theme::MUTED);
+    let text = Style::default().fg(theme::TEXT);
+
     let subj_str = if msg.subject.trim().is_empty() {
         "(no subject)".to_string()
     } else {
         msg.subject.clone()
     };
-    let subj = Line::from(Span::styled(
-        subj_str,
-        Style::default()
-            .fg(theme::TEXT)
-            .add_modifier(Modifier::BOLD),
-    ));
-    frame.render_widget(Paragraph::new(subj), chunks[1]);
+    let from_str = if msg.sender.trim().is_empty() {
+        "(no sender)".to_string()
+    } else {
+        msg.sender.clone()
+    };
+    let to_str = if msg.recipient.trim().is_empty() {
+        "(no recipient)".to_string()
+    } else {
+        msg.recipient.clone()
+    };
 
-    let muted = Style::default().fg(theme::MUTED);
-    let text = Style::default().fg(theme::TEXT);
-    let mut meta_spans = vec![
-        Span::styled("from ", muted),
-        Span::styled(
-            if msg.sender.trim().is_empty() {
-                "(no sender)".to_string()
-            } else {
-                msg.sender.clone()
-            },
-            text,
-        ),
-        Span::styled(" · ", muted),
-        Span::styled(format_time(&msg.date), muted),
+    let mut header_lines = vec![
+        Line::from(vec![
+            Span::styled("Subject  ", muted),
+            Span::styled(subj_str, text.add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("From     ", muted),
+            Span::styled(from_str, text),
+        ]),
+        Line::from(vec![
+            Span::styled("To       ", muted),
+            Span::styled(to_str, text),
+        ]),
+        Line::from(vec![
+            Span::styled("Date     ", muted),
+            Span::styled(format_time(&msg.date), text),
+        ]),
     ];
     if let Some(label) = msg
         .folder_id
         .as_deref()
         .filter(|f| !f.is_empty() && *f != "inbox")
     {
-        meta_spans.push(Span::styled(" · ", muted));
-        meta_spans.push(Span::styled(
-            format!("{} ", theme::G_LABEL),
-            Style::default().fg(theme::VIOLET),
-        ));
-        meta_spans.push(Span::styled(
-            label.to_string(),
-            Style::default().fg(theme::VIOLET),
-        ));
+        header_lines.push(Line::from(vec![
+            Span::styled("Folder   ", muted),
+            Span::styled(
+                format!("{} {}", theme::G_LABEL, label),
+                Style::default().fg(theme::VIOLET),
+            ),
+        ]));
     }
-    frame.render_widget(Paragraph::new(Line::from(meta_spans)), chunks[2]);
+    frame.render_widget(Paragraph::new(header_lines), header_inner);
 
-    // chunks[3] is reserved as a hairline gap before the body frame.
-    // We render nothing there — the frame's top border provides the divider.
-
+    // ── Body frame ──────────────────────────────────────────────────
     let body_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::HAIRLINE))
         .title(Span::styled(" MESSAGE ", Style::default().fg(theme::MUTED)));
-    let body_area = body_block.inner(chunks[4]);
-    frame.render_widget(body_block, chunks[4]);
+    let body_area = body_block.inner(chunks[2]);
+    frame.render_widget(body_block, chunks[2]);
 
     let body_lines = build_body_lines(reading);
     frame.render_widget(
@@ -869,12 +896,12 @@ fn draw_reading(frame: &mut Frame, app: &App) {
         body_area,
     );
 
-    frame.render_widget(Paragraph::new(chip_line()), chunks[6]);
+    frame.render_widget(Paragraph::new(chip_line()), chunks[4]);
 
     if let Some(fb) = app.state.feedback.as_ref() {
-        draw_feedback(frame, chunks[7], fb);
+        draw_feedback(frame, chunks[5], fb);
     } else {
-        draw_reading_hint(frame, chunks[7]);
+        draw_reading_hint(frame, chunks[5]);
     }
 }
 
