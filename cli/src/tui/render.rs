@@ -479,14 +479,13 @@ fn draw_inbox(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // welcome block
-            Constraint::Length(1),  // spacer
-            Constraint::Length(10), // bordered rows block (title + header + 7 rows + border)
-            Constraint::Length(1),  // …N more line
-            Constraint::Length(1),  // spacer
-            Constraint::Length(3),  // input box
-            Constraint::Length(1),  // hint / feedback
-            Constraint::Min(0),
+            Constraint::Length(5), // welcome block
+            Constraint::Length(1), // spacer
+            Constraint::Min(8),    // bordered rows block — expands to fill height
+            Constraint::Length(1), // …N more line
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // input box
+            Constraint::Length(1), // hint / feedback
         ])
         .split(area);
 
