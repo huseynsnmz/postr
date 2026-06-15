@@ -20,10 +20,10 @@
 - [x] Inbound email handler (mail-parser)
 
 ## Open for v1.0
-- [ ] Drop the `wasm-bindgen` shim in `worker/scripts/` once `worker-build`
-      stops passing `--force-enable-abort-handler` (or `wasm-bindgen` adds
-      an option to allocate the externref table itself). Tracks the build
-      workaround documented in `README.md`.
+- [ ] Drop the `worker-build` 0.8.4 pin in `worker/tools/` once newer
+      `worker-build`/`wasm-bindgen` releases stop requiring an externref
+      table that Rust doesn't emit. See `README.md` § "Why we pin
+      `worker-build`".
 - [ ] Worker: expose `POST /drafts/:draftId/send` so the CLI doesn't have to
       reassemble the draft body before calling `/reply` (see
       `cli/src/api/mailbox.rs::send_draft`)
