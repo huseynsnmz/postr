@@ -1,0 +1,29 @@
+[package]
+name = "postr-worker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 0.8.5 exposes `state.storage().sql()` (see SqlStorage in worker/src/sql.rs)
+# which is the API we need to mirror the TS worker's per-DO SQLite store.
+worker = "0.8"
+worker-macros = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "wasmbind", "clock"] }
+anyhow = "1"
+thiserror = "2"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+uuid = { version = "1", features = ["v4", "js"] }
+base64 = "0.22"
+mail-parser = "0.11"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

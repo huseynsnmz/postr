@@ -1,0 +1,63 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "postr-worker",
+	"compatibility_date": "2025-11-28",
+	"main": "build/worker/shim.mjs",
+	"build": {
+		"command": "cargo install -q worker-build && worker-build --release"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"vars": {
+		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
+		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
+		// The worker now fails closed outside local development if Access is not configured.
+		"DOMAINS": "example.com",
+		"EMAIL_ADDRESSES": [],
+		// "development" bypasses Cloudflare Access for web routes; CLI bearer is
+		// still required. Override to "production" in prod deploys.
+		// CLI_TOKEN is a secret — set via `wrangler secret put CLI_TOKEN`, not here.
+		"ENVIRONMENT": "development"
+	},
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"remote": true
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "BUCKET",
+			"bucket_name": "agentic-inbox",
+			"preview_bucket_name": "agentic-inbox"
+		}
+	],
+	"ai": {
+		"binding": "AI"
+	},
+	// NOTE: This declares a brand-new MailboxDO class owned by postr-worker.
+	// It does NOT share data with the TS worker's MailboxDO (./worker). Each
+	// DO class has its own per-instance SQLite store. Production cutover
+	// (preserving existing mailbox data) is a separate concern handled in a
+	// later workflow; for local dev this fresh storage is fine.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "MAILBOX",
+				"class_name": "MailboxDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"MailboxDO"
+			]
+		}
+	]
+}

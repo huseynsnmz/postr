@@ -1,0 +1,55 @@
+# Starter CI: builds and tests the CLI on every push/PR and checks that the
+# worker crate compiles for wasm32-unknown-unknown.
+#
+# Not included yet: worker-build + the wasm-bindgen externref shim from
+# worker/scripts/install-wasm-bindgen-shim.sh. Those need a cache-friendly
+# job that this starter does not set up; until that lands, the worker step
+# only runs `cargo check`, not a full build.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cli:
+    name: cli (build + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux keyring deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: cargo fmt
+        working-directory: cli
+        run: cargo fmt --all -- --check
+      - name: cargo build
+        working-directory: cli
+        run: cargo build --all-targets
+      - name: cargo clippy
+        working-directory: cli
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        working-directory: cli
+        run: cargo test
+
+  worker:
+    name: worker (cargo check, wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - name: cargo check (wasm32)
+        working-directory: worker
+        run: cargo check --target wasm32-unknown-unknown
+      - name: cargo clippy (wasm32)
+        working-directory: worker
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings

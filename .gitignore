@@ -1,0 +1,18 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Worker
+worker/node_modules/
+worker/.wrangler/
+worker/build/
+
+# Env
+.env
+.env.local
+.dev.vars
+**/.dev.vars
+
+# OS
+.DS_Store
+*.log
