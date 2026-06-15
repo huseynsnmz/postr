@@ -26,7 +26,7 @@ use crate::api::ApiClient;
 use crate::config::Config;
 use crate::state::{
     Account, AiKind, AiResultState, AppState, CommandState, ComposeField, ComposeKind,
-    ComposeState, LoadingKind, Mode, PriorMode,
+    ComposeState, LoadingKind, Mode, PendingConfirm, PriorMode,
 };
 use crate::tui::command::SLASH_COMMANDS;
 use crate::tui::render;
@@ -768,6 +768,28 @@ impl App {
             }
             return;
         }
+        if let Some(confirm) = self.state.pending_confirm.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.pending_confirm = None;
+                    match confirm {
+                        PendingConfirm::DeleteFromInbox { email_id } => {
+                            self.spawn_delete(email_id);
+                        }
+                        PendingConfirm::DeleteFromReading { email_id } => {
+                            self.spawn_delete(email_id);
+                            self.state.mode = Mode::Inbox;
+                            self.state.reading = None;
+                        }
+                    }
+                }
+                _ => {
+                    self.state.pending_confirm = None;
+                    self.state.flash_info("Cancelled");
+                }
+            }
+            return;
+        }
         if let KeyCode::Char('?') = key.code {
             self.state.show_shortcuts = true;
             return;
@@ -802,7 +824,9 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
-                    self.spawn_delete(m.meta.id);
+                    self.state.pending_confirm = Some(PendingConfirm::DeleteFromInbox {
+                        email_id: m.meta.id,
+                    });
                 }
             }
             KeyCode::Char('u') => self.spawn_undo(),
@@ -823,6 +847,26 @@ impl App {
         if self.state.show_shortcuts {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
                 self.state.show_shortcuts = false;
+            }
+            return;
+        }
+        if let Some(confirm) = self.state.pending_confirm.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.pending_confirm = None;
+                    match confirm {
+                        PendingConfirm::DeleteFromInbox { email_id }
+                        | PendingConfirm::DeleteFromReading { email_id } => {
+                            self.spawn_delete(email_id);
+                            self.state.mode = Mode::Inbox;
+                            self.state.reading = None;
+                        }
+                    }
+                }
+                _ => {
+                    self.state.pending_confirm = None;
+                    self.state.flash_info("Cancelled");
+                }
             }
             return;
         }
@@ -895,9 +939,8 @@ impl App {
             KeyCode::Char('d') => {
                 if let Some(r) = self.state.reading.as_ref() {
                     let id = r.thread[r.message_idx].id.clone();
-                    self.spawn_delete(id);
-                    self.state.mode = Mode::Inbox;
-                    self.state.reading = None;
+                    self.state.pending_confirm =
+                        Some(PendingConfirm::DeleteFromReading { email_id: id });
                 }
             }
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Reading),
@@ -1117,7 +1160,11 @@ impl App {
             }
             "delete" => {
                 if let Some(id) = self.current_target_id() {
-                    self.spawn_delete(id);
+                    let action = match self.state.reading {
+                        Some(_) => PendingConfirm::DeleteFromReading { email_id: id },
+                        None => PendingConfirm::DeleteFromInbox { email_id: id },
+                    };
+                    self.state.pending_confirm = Some(action);
                 }
             }
             "star" => self.toggle_star_on_target(),

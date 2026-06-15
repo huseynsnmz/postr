@@ -55,6 +55,61 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.state.show_shortcuts {
         draw_shortcuts_overlay(frame, &app.state.mode);
     }
+    if app.state.pending_confirm.is_some() {
+        draw_confirm_overlay(frame);
+    }
+}
+
+// ── Destructive-action confirm overlay ────────────────────────────────────────
+
+fn draw_confirm_overlay(frame: &mut Frame) {
+    let area = frame.area();
+    let w = 50u16.min(area.width.saturating_sub(4));
+    let h = 5u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let panel = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, panel);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::RED))
+        .style(Style::default().bg(theme::RECESSED_WELL))
+        .title(Span::styled(
+            " DELETE ",
+            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
+    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+    let key = Style::default()
+        .fg(theme::SIGNAL_LIGHT)
+        .bg(theme::RECESSED_WELL)
+        .add_modifier(Modifier::BOLD);
+
+    let lines = vec![
+        Line::from(Span::styled(" Permanently delete this message?", text)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ", text),
+            Span::styled("y", key),
+            Span::styled(" confirm   ", muted),
+            Span::styled("any other key", key),
+            Span::styled(" cancel", muted),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
+        inner,
+    );
 }
 
 // ── Shortcuts overlay (?) ────────────────────────────────────────────────────
@@ -167,13 +222,13 @@ fn draw_inbox(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // welcome block
-            Constraint::Length(1), // spacer
-            Constraint::Length(9), // bordered rows block (title + 7 rows + bottom border)
-            Constraint::Length(1), // …N more line
-            Constraint::Length(1), // spacer
-            Constraint::Length(3), // input box
-            Constraint::Length(1), // hint / feedback
+            Constraint::Length(5),  // welcome block
+            Constraint::Length(1),  // spacer
+            Constraint::Length(10), // bordered rows block (title + header + 7 rows + border)
+            Constraint::Length(1),  // …N more line
+            Constraint::Length(1),  // spacer
+            Constraint::Length(3),  // input box
+            Constraint::Length(1),  // hint / feedback
             Constraint::Min(0),
         ])
         .split(area);
@@ -239,11 +294,14 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
 // ── Message rows ─────────────────────────────────────────────────────────────
 
 fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Block title carries the account email so a future multi-mailbox switch
+    // surfaces in the same place.
+    let title = format!(" INBOX · {} ", state.account.email);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::HAIRLINE))
-        .title(Span::styled(" INBOX ", Style::default().fg(theme::MUTED)));
+        .title(Span::styled(title, Style::default().fg(theme::MUTED)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -255,26 +313,46 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
     const W_GLYPH: usize = 2;
     const TIME_GUTTER: usize = 1;
 
-    let take_n = inner.height as usize;
-    let lines: Vec<Line> = state
-        .messages
-        .iter()
-        .take(take_n)
-        .enumerate()
-        .map(|(i, m)| {
-            row_line(
-                i,
-                m,
-                state.selected_index == i,
-                total_w,
-                W_MARKER,
-                W_NUMBER,
-                W_SENDER,
-                W_GLYPH,
-                TIME_GUTTER,
-            )
-        })
-        .collect();
+    // Header row: # · Sender · Subject · Date. Same column widths as the
+    // data rows so they line up vertically.
+    let muted = Style::default().fg(theme::MUTED);
+    let header = {
+        let time_w = "Date".len();
+        let fixed = W_MARKER + W_NUMBER + W_SENDER + W_GLYPH + TIME_GUTTER + time_w;
+        let subject_w = total_w.saturating_sub(fixed);
+        Line::from(vec![
+            Span::styled("  ", muted),
+            Span::styled(format!("{:>2} ", "#"), muted),
+            Span::styled(pad_right("Sender", W_SENDER), muted),
+            Span::styled("  ", muted),
+            Span::styled(pad_right("Subject", subject_w), muted),
+            Span::styled(" Date".to_string(), muted),
+        ])
+    };
+
+    let take_n = (inner.height as usize).saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::with_capacity(take_n + 1);
+    lines.push(header);
+    lines.extend(
+        state
+            .messages
+            .iter()
+            .take(take_n)
+            .enumerate()
+            .map(|(i, m)| {
+                row_line(
+                    i,
+                    m,
+                    state.selected_index == i,
+                    total_w,
+                    W_MARKER,
+                    W_NUMBER,
+                    W_SENDER,
+                    W_GLYPH,
+                    TIME_GUTTER,
+                )
+            }),
+    );
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -796,11 +874,11 @@ fn draw_command_menu(frame: &mut Frame, _app: &App, cmd: &CommandState, prior: P
     let area = frame.area();
 
     // Anchor at the input box. Layout for inbox: chunks[5] starts at
-    //   y = welcome(5) + spacer(1) + rows(9) + more(1) + spacer(1) = 17,
+    //   y = welcome(5) + spacer(1) + rows(10) + more(1) + spacer(1) = 18,
     //   height 3. For reading, no dedicated input row — anchor near the
     //   bottom (3 rows above the bottom edge).
     let input_top = match prior {
-        PriorMode::Inbox => area.y + 17,
+        PriorMode::Inbox => area.y + 18,
         PriorMode::Reading => area.y + area.height.saturating_sub(4),
     };
 

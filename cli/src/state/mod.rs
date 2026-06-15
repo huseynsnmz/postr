@@ -326,6 +326,17 @@ pub struct AppState {
     /// new Mode variant because every screen can show it without otherwise
     /// changing modes.
     pub show_shortcuts: bool,
+    /// Pending destructive action awaiting `y` confirmation. Drawn as a
+    /// small inline prompt at the bottom of the screen.
+    pub pending_confirm: Option<PendingConfirm>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PendingConfirm {
+    /// Hard-delete an email from the inbox view.
+    DeleteFromInbox { email_id: String },
+    /// Hard-delete the currently open thread message.
+    DeleteFromReading { email_id: String },
 }
 
 impl AppState {
@@ -344,6 +355,7 @@ impl AppState {
             ai: None,
             last_undoable: None,
             show_shortcuts: false,
+            pending_confirm: None,
         }
     }
 
