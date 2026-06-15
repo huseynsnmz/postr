@@ -80,6 +80,7 @@ impl DurableObject for MailboxDO {
             (Method::Post, "/rpc/find_thread_by_subject") => {
                 self.rpc_find_thread_by_subject(&mut req).await
             }
+            (Method::Post, "/rpc/purge_old_trash") => self.rpc_purge_old_trash(&mut req).await,
             _ => Response::error(format!("MailboxDO: unknown rpc path {path}"), 404),
         }
     }
@@ -861,6 +862,65 @@ impl MailboxDO {
         )?;
 
         Response::from_json(&att_rows)
+    }
+
+    /// Sweep emails out of the `trash` folder that have been sitting there
+    /// for at least `days` days. Returns a list of
+    /// `{ email_id, attachments: [{id, filename}] }` records so the
+    /// scheduled-event caller can clean up the freed R2 attachment blobs.
+    ///
+    /// Cutoff is computed against the email's `date` column (RFC 3339
+    /// strings written by `rpc_create_email`); SQLite's `datetime()` parses
+    /// ISO timestamps natively.
+    async fn rpc_purge_old_trash(&self, req: &mut Request) -> Result<Response> {
+        #[derive(serde::Deserialize)]
+        struct PurgeArgs {
+            #[serde(default = "default_days")]
+            days: i64,
+        }
+        fn default_days() -> i64 {
+            30
+        }
+        let args: PurgeArgs = req.json().await?;
+        let days = args.days.max(1);
+        let sql_storage = self.state.storage().sql();
+
+        // Pick up everything older than the cutoff, then snapshot their
+        // attachments before the cascade-delete fires.
+        let modifier = format!("-{days} days");
+        let stale_emails: Vec<FolderIdRow> = sql_storage
+            .exec(
+                "SELECT id FROM emails
+                 WHERE folder_id = 'trash'
+                   AND date IS NOT NULL
+                   AND datetime(date) < datetime('now', ?)",
+                Some(vec![modifier.as_str().into()]),
+            )?
+            .to_array()?;
+
+        if stale_emails.is_empty() {
+            return Response::from_json(&serde_json::Value::Array(Vec::new()));
+        }
+
+        let mut purged: Vec<serde_json::Value> = Vec::with_capacity(stale_emails.len());
+        for row in &stale_emails {
+            let atts: Vec<DeletedAttachment> = sql_storage
+                .exec(
+                    "SELECT id, filename FROM attachments WHERE email_id = ?",
+                    Some(vec![row.id.as_str().into()]),
+                )?
+                .to_array()?;
+            sql_storage.exec(
+                "DELETE FROM emails WHERE id = ?",
+                Some(vec![row.id.as_str().into()]),
+            )?;
+            purged.push(serde_json::json!({
+                "email_id": row.id,
+                "attachments": atts,
+            }));
+        }
+
+        Response::from_json(&purged)
     }
 
     /// Port of `MailboxDO.moveEmail` (TS:634-650). Folder lookup is

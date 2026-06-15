@@ -944,22 +944,7 @@ impl App {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.state.pending_confirm = None;
-                    match confirm {
-                        PendingConfirm::DeleteFromInbox {
-                            email_id,
-                            mailbox_id,
-                        } => {
-                            self.spawn_delete(email_id, mailbox_id);
-                        }
-                        PendingConfirm::DeleteFromReading {
-                            email_id,
-                            mailbox_id,
-                        } => {
-                            self.spawn_delete(email_id, mailbox_id);
-                            self.state.mode = Mode::Inbox;
-                            self.state.reading = None;
-                        }
-                    }
+                    self.execute_pending_confirm(confirm);
                 }
                 _ => {
                     self.state.pending_confirm = None;
@@ -1002,10 +987,7 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
-                    self.state.pending_confirm = Some(PendingConfirm::DeleteFromInbox {
-                        email_id: m.meta.id,
-                        mailbox_id: m.mailbox_id,
-                    });
+                    self.arm_delete_confirm(m.meta.id, m.mailbox_id, false);
                 }
             }
             KeyCode::Char('u') => self.spawn_undo(),
@@ -1033,20 +1015,7 @@ impl App {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.state.pending_confirm = None;
-                    match confirm {
-                        PendingConfirm::DeleteFromInbox {
-                            email_id,
-                            mailbox_id,
-                        }
-                        | PendingConfirm::DeleteFromReading {
-                            email_id,
-                            mailbox_id,
-                        } => {
-                            self.spawn_delete(email_id, mailbox_id);
-                            self.state.mode = Mode::Inbox;
-                            self.state.reading = None;
-                        }
-                    }
+                    self.execute_pending_confirm(confirm);
                 }
                 _ => {
                     self.state.pending_confirm = None;
@@ -1127,10 +1096,7 @@ impl App {
                 if let Some(r) = self.state.reading.as_ref() {
                     let id = r.thread[r.message_idx].id.clone();
                     let mb = r.mailbox_id.clone();
-                    self.state.pending_confirm = Some(PendingConfirm::DeleteFromReading {
-                        email_id: id,
-                        mailbox_id: mb,
-                    });
+                    self.arm_delete_confirm(id, mb, true);
                 }
             }
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Reading),
@@ -1350,17 +1316,8 @@ impl App {
             }
             "delete" => {
                 if let Some((id, mb)) = self.current_target() {
-                    let action = match self.state.reading {
-                        Some(_) => PendingConfirm::DeleteFromReading {
-                            email_id: id,
-                            mailbox_id: mb,
-                        },
-                        None => PendingConfirm::DeleteFromInbox {
-                            email_id: id,
-                            mailbox_id: mb,
-                        },
-                    };
-                    self.state.pending_confirm = Some(action);
+                    let from_reading = self.state.reading.is_some();
+                    self.arm_delete_confirm(id, mb, from_reading);
                 }
             }
             "star" => self.toggle_star_on_target(),
@@ -1670,6 +1627,63 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Decide whether `d` should soft-delete (move to trash) or hard-delete.
+    /// In any folder except `trash` the row is moved; inside `trash` we
+    /// purge it for good.
+    fn arm_delete_confirm(&mut self, email_id: String, mailbox_id: String, from_reading: bool) {
+        let action = if self.state.folder.eq_ignore_ascii_case("trash") {
+            crate::state::ConfirmAction::HardDelete
+        } else {
+            crate::state::ConfirmAction::MoveToTrash
+        };
+        self.state.pending_confirm = Some(PendingConfirm {
+            email_id,
+            mailbox_id,
+            action,
+            from_reading,
+        });
+    }
+
+    fn execute_pending_confirm(&mut self, confirm: PendingConfirm) {
+        match confirm.action {
+            crate::state::ConfirmAction::MoveToTrash => {
+                self.spawn_move_to_trash(confirm.email_id, confirm.mailbox_id);
+            }
+            crate::state::ConfirmAction::HardDelete => {
+                self.spawn_delete(confirm.email_id, confirm.mailbox_id);
+            }
+        }
+        if confirm.from_reading {
+            self.state.mode = Mode::Inbox;
+            self.state.reading = None;
+        }
+    }
+
+    pub fn spawn_move_to_trash(&mut self, email_id: String, mailbox_id: String) {
+        // Stage an undo so `u` brings the row back to the prior folder.
+        self.state.last_undoable = Some(crate::state::UndoableAction::Archive {
+            email_id: email_id.clone(),
+            mailbox_id: mailbox_id.clone(),
+            prior_folder: self.state.folder.clone(),
+            recorded_at: std::time::Instant::now(),
+        });
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.move_email(&mailbox_id, &email_id, "trash").await {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::ActionDone("Moved to trash · u to undo".into()));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: format!("trash: {e}"),
+                    });
+                }
+            }
+        });
     }
 
     /// Reading view takes precedence; otherwise the selected inbox row.

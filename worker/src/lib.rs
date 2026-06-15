@@ -85,3 +85,13 @@ async fn email_handler(message: ForwardableEmailMessage, env: Env, ctx: Context)
     console_error_panic_hook::set_once();
     inbound::receive_email(message, env, ctx).await
 }
+
+/// Daily 04:15 UTC sweep — purge every mailbox's `trash` folder of rows
+/// older than 30 days. Wired in wrangler.jsonc under `triggers.crons`.
+#[event(scheduled)]
+async fn scheduled_handler(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    console_error_panic_hook::set_once();
+    if let Err(e) = routes::cron::purge_old_trash(env).await {
+        console_error!("trash purge failed: {e}");
+    }
+}

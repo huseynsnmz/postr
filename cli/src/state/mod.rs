@@ -439,17 +439,22 @@ impl MailboxPickerState {
 }
 
 #[derive(Debug, Clone)]
-pub enum PendingConfirm {
-    /// Hard-delete an email from the inbox view.
-    DeleteFromInbox {
-        email_id: String,
-        mailbox_id: String,
-    },
-    /// Hard-delete the currently open thread message.
-    DeleteFromReading {
-        email_id: String,
-        mailbox_id: String,
-    },
+pub struct PendingConfirm {
+    pub email_id: String,
+    pub mailbox_id: String,
+    pub action: ConfirmAction,
+    /// `true` when triggered from the reading view; the handler pops back
+    /// to the inbox after the action completes.
+    pub from_reading: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Move the email into the `trash` folder. Reversible from there.
+    MoveToTrash,
+    /// Permanently hard-delete the email and its R2 attachments. Only
+    /// triggered when the user is already inside the trash folder.
+    HardDelete,
 }
 
 impl AppState {

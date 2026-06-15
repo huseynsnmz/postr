@@ -55,8 +55,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.state.show_shortcuts {
         draw_shortcuts_overlay(frame, &app.state.mode);
     }
-    if app.state.pending_confirm.is_some() {
-        draw_confirm_overlay(frame);
+    if let Some(confirm) = app.state.pending_confirm.as_ref() {
+        draw_confirm_overlay(frame, confirm);
     }
     if let Some(picker) = app.state.mailbox_picker.as_ref() {
         draw_mailbox_picker(
@@ -304,9 +304,10 @@ fn draw_mailbox_picker(
 
 // ── Destructive-action confirm overlay ────────────────────────────────────────
 
-fn draw_confirm_overlay(frame: &mut Frame) {
+fn draw_confirm_overlay(frame: &mut Frame, confirm: &crate::state::PendingConfirm) {
+    use crate::state::ConfirmAction;
     let area = frame.area();
-    let w = 50u16.min(area.width.saturating_sub(4));
+    let w = 56u16.min(area.width.saturating_sub(4));
     let h = 5u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -318,14 +319,25 @@ fn draw_confirm_overlay(frame: &mut Frame) {
     };
     frame.render_widget(Clear, panel);
 
+    let (title, prompt, border_color) = match confirm.action {
+        ConfirmAction::MoveToTrash => (" TRASH ", " Move this message to trash?", theme::AMBER),
+        ConfirmAction::HardDelete => (
+            " PERMANENT DELETE ",
+            " Permanently delete this message? Cannot be undone.",
+            theme::RED,
+        ),
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::RED))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme::RECESSED_WELL))
         .title(Span::styled(
-            " DELETE ",
-            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+            title,
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
@@ -338,7 +350,7 @@ fn draw_confirm_overlay(frame: &mut Frame) {
         .add_modifier(Modifier::BOLD);
 
     let lines = vec![
-        Line::from(Span::styled(" Permanently delete this message?", text)),
+        Line::from(Span::styled(prompt.to_string(), text)),
         Line::from(""),
         Line::from(vec![
             Span::styled(" ", text),
@@ -710,12 +722,15 @@ fn row_line(
         Span::styled(String::new(), apply_bg(Style::default()))
     };
 
-    let (glyph_char, glyph_color) = if msg.urgent {
+    // `starred` is a flag, not a state — keep it visible even when the row
+    // is unread (which is otherwise indicated by the bold sender style).
+    // Visual precedence is: starred > urgent > unread > attachment > read.
+    let (glyph_char, glyph_color) = if msg.meta.starred {
+        (theme::G_STARRED, theme::AMBER)
+    } else if msg.urgent {
         (theme::G_URGENT, theme::RED)
     } else if unread {
         (theme::G_UNREAD, theme::SIGNAL_LIGHT)
-    } else if msg.meta.starred {
-        (theme::G_STARRED, theme::AMBER)
     } else if msg.has_attachment {
         (theme::G_ATTACHMENT, theme::TEAL)
     } else {
@@ -837,10 +852,10 @@ fn draw_hint(frame: &mut Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled(" ", label),
         Span::styled("/", key),
-        Span::styled(" commands", label),
+        Span::styled(" cmd", label),
         sep.clone(),
         Span::styled("↑↓", key),
-        Span::styled(" select", label),
+        Span::styled(" sel", label),
         sep.clone(),
         Span::styled("⏎", key),
         Span::styled(" open", label),
@@ -848,11 +863,20 @@ fn draw_hint(frame: &mut Frame, area: Rect) {
         Span::styled("c", key),
         Span::styled(" compose", label),
         sep.clone(),
+        Span::styled("s", key),
+        Span::styled(" star", label),
+        sep.clone(),
+        Span::styled("e", key),
+        Span::styled(" archive", label),
+        sep.clone(),
+        Span::styled("d", key),
+        Span::styled(" trash", label),
+        sep.clone(),
         Span::styled("r", key),
         Span::styled(" refresh", label),
         sep,
         Span::styled("?", key),
-        Span::styled(" shortcuts", label),
+        Span::styled(" more", label),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

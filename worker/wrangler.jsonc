@@ -63,5 +63,12 @@
 				"MailboxDO"
 			]
 		}
-	]
+	],
+	// Daily 04:15 UTC sweep: purge emails that have been sitting in any
+	// mailbox's `trash` folder for > 30 days.
+	"triggers": {
+		"crons": [
+			"15 4 * * *"
+		]
+	}
 }
