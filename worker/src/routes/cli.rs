@@ -8,7 +8,7 @@ use serde::Deserialize;
 use worker::*;
 
 use crate::auth::{auth_error_response, check_auth};
-use crate::mailbox;
+use crate::mailbox::{self, MailboxRecord};
 use crate::types::{CliMeResponse, MailboxBrief};
 
 pub async fn me(req: Request, ctx: RouteContext<()>) -> Result<Response> {
@@ -31,11 +31,27 @@ pub async fn me(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     Response::from_json(&CliMeResponse { email, mailboxes })
 }
 
+fn err_response(status: u16, error: &str) -> Result<Response> {
+    Ok(Response::from_json(&serde_json::json!({ "error": error }))?.with_status(status))
+}
+
+fn brief(rec: &MailboxRecord) -> MailboxBrief {
+    MailboxBrief {
+        id: rec.address.clone(),
+        address: rec.address.clone(),
+        display_name: rec.display_name.clone(),
+    }
+}
+
+fn normalize_display_name(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// `POST /api/v1/cli/mailboxes` — idempotent mailbox creation.
 ///
 /// Writes `mailboxes/{address}.json` to R2 if the key doesn't already exist.
-/// The file's content is just a marker — `require_mailbox` only checks
-/// existence via HEAD. Returns the new (or existing) mailbox.
+/// The body shape is `MailboxRecord` — `address` plus optional `display_name`
+/// for outbound `From:` personalization. Returns the new (or existing) mailbox.
 pub async fn create_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     if let Err(e) = check_auth(&req, &ctx.env).await {
         return auth_error_response(e);
@@ -44,42 +60,102 @@ pub async fn create_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
     #[derive(Deserialize)]
     struct Body {
         address: String,
+        #[serde(default)]
+        display_name: Option<String>,
     }
 
     let body: Body = match req.json().await {
         Ok(b) => b,
-        Err(_) => {
-            let mut r =
-                Response::from_json(&serde_json::json!({"error": "invalid_json"}))?;
-            r = r.with_status(400);
-            return Ok(r);
-        }
+        Err(_) => return err_response(400, "invalid_json"),
     };
 
     let address = body.address.trim().to_lowercase();
     if address.is_empty() || !address.contains('@') {
-        let mut r = Response::from_json(&serde_json::json!({"error": "invalid_address"}))?;
-        r = r.with_status(400);
-        return Ok(r);
+        return err_response(400, "invalid_address");
     }
 
-    let bucket = ctx.env.bucket("BUCKET")?;
-    let key = format!("mailboxes/{}.json", address);
-
-    let already = bucket.head(&key).await?.is_some();
-    if !already {
-        let body = serde_json::json!({"address": address}).to_string();
-        bucket.put(&key, body).execute().await?;
+    let existing = mailbox::load_record(&ctx.env, &address).await?;
+    let (rec, status) = match existing {
+        Some(rec) => (rec, 200),
+        None => (
+            MailboxRecord {
+                address: address.clone(),
+                display_name: normalize_display_name(body.display_name),
+            },
+            201,
+        ),
+    };
+    if status == 201 {
+        mailbox::save_record(&ctx.env, &rec).await?;
     }
 
-    let mut r = Response::from_json(&MailboxBrief {
-        id: address.clone(),
-        address,
-    })?;
-    if !already {
-        r = r.with_status(201);
+    Ok(Response::from_json(&brief(&rec))?.with_status(status))
+}
+
+/// `PUT /api/v1/cli/mailboxes/:mailboxId` — partial update of a mailbox.
+///
+/// Currently only `display_name` is mutable — addresses can't be renamed
+/// (the address is the R2 key and the DO id). Pass `display_name: null` to
+/// clear it.
+pub async fn update_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if let Err(e) = check_auth(&req, &ctx.env).await {
+        return auth_error_response(e);
     }
-    Ok(r)
+    let Some(mailbox_id) = ctx.param("mailboxId").cloned() else {
+        return err_response(400, "missing_mailbox_id");
+    };
+
+    #[derive(Deserialize)]
+    struct Body {
+        // Tri-state: omit → leave unchanged; `null` → clear; string → set.
+        #[serde(default, deserialize_with = "deserialize_some")]
+        display_name: Option<Option<String>>,
+    }
+
+    let body: Body = match req.json().await {
+        Ok(b) => b,
+        Err(_) => return err_response(400, "invalid_json"),
+    };
+
+    let Some(mut rec) = mailbox::load_record(&ctx.env, &mailbox_id).await? else {
+        return err_response(404, "mailbox_not_found");
+    };
+
+    if let Some(field) = body.display_name {
+        rec.display_name = normalize_display_name(field);
+    }
+    mailbox::save_record(&ctx.env, &rec).await?;
+    Response::from_json(&brief(&rec))
+}
+
+/// `DELETE /api/v1/cli/mailboxes/:mailboxId` — remove the R2 marker.
+///
+/// The Durable Object's stored data is left intact. The DO is addressed by
+/// `idFromName(address)`, so re-creating the mailbox later resurrects the
+/// same SQLite contents — which is the behavior the user usually wants when
+/// "delete and re-add" is really "fix a typo in display_name".
+pub async fn delete_mailbox(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if let Err(e) = check_auth(&req, &ctx.env).await {
+        return auth_error_response(e);
+    }
+    let Some(mailbox_id) = ctx.param("mailboxId").cloned() else {
+        return err_response(400, "missing_mailbox_id");
+    };
+    if mailbox::load_record(&ctx.env, &mailbox_id).await?.is_none() {
+        return err_response(404, "mailbox_not_found");
+    }
+    mailbox::delete_record(&ctx.env, &mailbox_id).await?;
+    Response::empty().map(|r| r.with_status(204))
+}
+
+/// Distinguishes "field missing" from "field set to null" during JSON
+/// deserialization — needed for tri-state PATCH-style updates.
+fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Pull the first entry of `EMAIL_ADDRESSES`. Tolerates either:

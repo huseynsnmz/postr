@@ -24,14 +24,49 @@ enum Cmd {
     Logout,
     /// Print the currently logged-in identity
     Whoami,
-    /// Create a mailbox on the worker (one-time bootstrap per address).
-    /// Becomes the default mailbox if none is set yet.
+    /// Manage mailboxes on the worker
+    #[command(subcommand)]
+    Mailbox(MailboxCmd),
+    /// Deprecated alias for `postr mailbox add`. Will be removed.
+    #[command(hide = true)]
     AddMailbox {
-        /// Email address to receive mail at, e.g. me@yourdomain.com
         address: String,
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Launch the TUI (default)
     Tui,
+}
+
+#[derive(Subcommand)]
+enum MailboxCmd {
+    /// Create a mailbox on the worker (one-time bootstrap per address).
+    /// Becomes the default mailbox if none is set yet.
+    Add {
+        /// Email address to receive mail at, e.g. me@yourdomain.com
+        address: String,
+        /// Personal name attached to outbound `From:` headers
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Update mailbox metadata. Currently only the display name is mutable.
+    Update {
+        /// Email address of the mailbox to update
+        address: String,
+        /// New display name. Use `--clear-name` to remove the name instead.
+        #[arg(long, conflicts_with = "clear_name")]
+        name: Option<String>,
+        /// Clear the display name so outbound mail uses the bare address.
+        #[arg(long)]
+        clear_name: bool,
+    },
+    /// List all mailboxes known to the worker.
+    List,
+    /// Remove a mailbox marker (the DO's stored mail is preserved).
+    Remove {
+        /// Email address to remove
+        address: String,
+    },
 }
 
 #[tokio::main]
@@ -45,7 +80,15 @@ async fn main() -> Result<()> {
         Cmd::Login { url, token } => login(url, token).await,
         Cmd::Logout => logout(),
         Cmd::Whoami => whoami().await,
-        Cmd::AddMailbox { address } => add_mailbox(address).await,
+        Cmd::Mailbox(MailboxCmd::Add { address, name }) => mailbox_add(address, name).await,
+        Cmd::Mailbox(MailboxCmd::Update {
+            address,
+            name,
+            clear_name,
+        }) => mailbox_update(address, name, clear_name).await,
+        Cmd::Mailbox(MailboxCmd::List) => mailbox_list().await,
+        Cmd::Mailbox(MailboxCmd::Remove { address }) => mailbox_remove(address).await,
+        Cmd::AddMailbox { address, name } => mailbox_add(address, name).await,
         Cmd::Tui => tui_entry().await,
     }
 }
@@ -93,7 +136,7 @@ async fn login(url: String, token_arg: Option<String>) -> Result<()> {
     println!("  email: {}", me.email);
     println!("  mailboxes: {}", me.mailboxes.len());
     for m in &me.mailboxes {
-        println!("    {} ({})", m.address, m.id);
+        println!("    {}", format_name(m));
     }
     Ok(())
 }
@@ -105,16 +148,31 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-async fn add_mailbox(address: String) -> Result<()> {
-    let Some(mut cfg) = Config::load()? else {
+fn require_session() -> Result<(Config, ApiClient)> {
+    let Some(cfg) = Config::load()? else {
         return Err(anyhow!("not logged in — run `postr login <url>` first"));
     };
     let Some(token) = kr::load_token()? else {
         return Err(anyhow!("not logged in — run `postr login <url>` first"));
     };
     let client = ApiClient::new(&cfg.worker_base_url, &token)?;
-    let mb = client.create_mailbox(&address).await?;
-    println!("Mailbox: {} ({})", mb.address, mb.id);
+    Ok((cfg, client))
+}
+
+fn format_name(mb: &postr::api::types::CliMailbox) -> String {
+    match mb.display_name.as_deref().filter(|s| !s.is_empty()) {
+        Some(n) => format!("{} <{}>", n, mb.address),
+        None => mb.address.clone(),
+    }
+}
+
+async fn mailbox_add(address: String, name: Option<String>) -> Result<()> {
+    let (mut cfg, client) = require_session()?;
+    let mb = client
+        .create_mailbox(&address, name.as_deref())
+        .await
+        .context("creating mailbox")?;
+    println!("Mailbox: {}", format_name(&mb));
     if cfg.default_mailbox_id.is_none() {
         cfg.default_mailbox_id = Some(mb.id.clone());
         if cfg.email.as_deref().is_none_or(str::is_empty) {
@@ -122,6 +180,51 @@ async fn add_mailbox(address: String) -> Result<()> {
         }
         cfg.save()?;
         println!("Set as default mailbox.");
+    }
+    Ok(())
+}
+
+async fn mailbox_update(address: String, name: Option<String>, clear_name: bool) -> Result<()> {
+    let (_, client) = require_session()?;
+    let display = match (name, clear_name) {
+        (None, false) => return Err(anyhow!("nothing to update — pass --name or --clear-name")),
+        (None, true) => Some(None),
+        (Some(n), _) => Some(Some(n)),
+    };
+    // `display` is Some(...) by construction above, so the as_deref nests safely.
+    let payload = display.as_ref().map(|inner| inner.as_deref());
+    let mb = client
+        .update_mailbox(&address, payload)
+        .await
+        .context("updating mailbox")?;
+    println!("Updated: {}", format_name(&mb));
+    Ok(())
+}
+
+async fn mailbox_list() -> Result<()> {
+    let (_, client) = require_session()?;
+    let me = client.me().await.context("calling /cli/me")?;
+    if me.mailboxes.is_empty() {
+        println!("No mailboxes.");
+        return Ok(());
+    }
+    for mb in &me.mailboxes {
+        println!("  {}", format_name(mb));
+    }
+    Ok(())
+}
+
+async fn mailbox_remove(address: String) -> Result<()> {
+    let (mut cfg, client) = require_session()?;
+    client
+        .delete_mailbox(&address)
+        .await
+        .context("removing mailbox")?;
+    println!("Removed {}.", address);
+    if cfg.default_mailbox_id.as_deref() == Some(address.as_str()) {
+        cfg.default_mailbox_id = None;
+        cfg.save()?;
+        println!("Cleared default mailbox.");
     }
     Ok(())
 }
@@ -141,7 +244,7 @@ async fn whoami() -> Result<()> {
     println!("Email:     {}", me.email);
     println!("Mailboxes:");
     for m in &me.mailboxes {
-        println!("  {} ({})", m.address, m.id);
+        println!("  {}", format_name(m));
     }
     Ok(())
 }

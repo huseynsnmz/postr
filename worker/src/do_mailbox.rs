@@ -929,8 +929,7 @@ impl MailboxDO {
         binds.push(offset.into());
 
         let sql_storage = self.state.storage().sql();
-        let rows: Vec<EmailListSqlRow> =
-            sql_storage.exec(&query, Some(binds))?.to_array()?;
+        let rows: Vec<EmailListSqlRow> = sql_storage.exec(&query, Some(binds))?.to_array()?;
         let emails: Vec<EmailMeta> = rows.into_iter().map(meta_from_sql).collect();
         Response::from_json(&emails)
     }
@@ -1126,9 +1125,7 @@ fn build_search_conditions(
 /// trim, and lowercase. Mirrors the TS regex
 /// `/^(?:(?:re|fwd?|fw|aw|wg|r[eé]f|sv)\s*:\s*)+/i`.
 fn normalize_subject(input: &str) -> String {
-    let prefixes = [
-        "re", "fwd", "fw", "aw", "wg", "ref", "réf", "sv",
-    ];
+    let prefixes = ["re", "fwd", "fw", "aw", "wg", "ref", "réf", "sv"];
     let mut s = input.trim().to_string();
     loop {
         let lower = s.to_lowercase();

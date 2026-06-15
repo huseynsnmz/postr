@@ -136,14 +136,12 @@ fn strip_block_tag(input: &str, tag: &str) -> String {
                 if let Some(rel_close) = bytes[after..].iter().position(|&b| b == b'>') {
                     let open_end = after + rel_close + 1;
                     // Find matching `</{tag}>` (case-insensitive).
-                    let close_pat_start =
-                        find_case_insensitive(&bytes[open_end..], b"</");
+                    let close_pat_start = find_case_insensitive(&bytes[open_end..], b"</");
                     if let Some(rel_lt) = close_pat_start {
                         let candidate_pos = open_end + rel_lt;
                         let inner = candidate_pos + 2;
                         if inner + tag.len() <= bytes.len()
-                            && bytes[inner..inner + tag.len()]
-                                .eq_ignore_ascii_case(tag.as_bytes())
+                            && bytes[inner..inner + tag.len()].eq_ignore_ascii_case(tag.as_bytes())
                         {
                             if let Some(rel_gt) =
                                 bytes[inner + tag.len()..].iter().position(|&b| b == b'>')
@@ -384,9 +382,7 @@ pub async fn summarize(mut req: Request, ctx: RouteContext<()>) -> Result<Respon
         }
     };
 
-    let mut suggested = parsed
-        .and_then(|p| p.suggested_replies)
-        .unwrap_or_default();
+    let mut suggested = parsed.and_then(|p| p.suggested_replies).unwrap_or_default();
     if suggested.len() > 3 {
         suggested.truncate(3);
     }
@@ -598,8 +594,13 @@ pub async fn ask(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
 
     // Count call: filters only (no page/limit).
     let count_body = serde_json::to_value(&filters).unwrap_or_else(|_| json!({}));
-    let count_val =
-        rpc_call(&ctx.env, &mailbox_id, "/rpc/count_search_results", &count_body).await?;
+    let count_val = rpc_call(
+        &ctx.env,
+        &mailbox_id,
+        "/rpc/count_search_results",
+        &count_body,
+    )
+    .await?;
     let count = count_val
         .get("count")
         .and_then(|v| v.as_i64())

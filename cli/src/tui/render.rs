@@ -30,8 +30,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 PriorMode::Inbox => draw_inbox(frame, app),
                 PriorMode::Reading => draw_reading(frame, app),
             }
+            // Only float the popover when the buffer looks like a slash
+            // command — typing plain text just edits the input box.
             if let Some(cmd) = app.state.command.as_ref() {
-                draw_command_menu(frame, app, cmd, *prior);
+                if cmd.query.starts_with('/') {
+                    draw_command_menu(frame, app, cmd, *prior);
+                }
             }
         }
         Mode::AiPending { kind, prior } => {
@@ -58,28 +62,25 @@ fn draw_inbox(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(7),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(5), // welcome block
+            Constraint::Length(1), // spacer
+            Constraint::Length(9), // bordered rows block (title + 7 rows + bottom border)
+            Constraint::Length(1), // …N more line
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // input box
+            Constraint::Length(1), // hint / feedback
             Constraint::Min(0),
         ])
         .split(area);
 
     draw_welcome(frame, chunks[0], &app.state);
-    draw_label(frame, chunks[2], "  INBOX");
-    draw_rows(frame, chunks[4], &app.state);
-    draw_more(frame, chunks[5], app.state.more_count);
-    draw_input(frame, chunks[7]);
+    draw_rows(frame, chunks[2], &app.state);
+    draw_more(frame, chunks[3], app.state.more_count);
+    draw_input(frame, chunks[5], &app.state);
     if let Some(fb) = app.state.feedback.as_ref() {
-        draw_feedback(frame, chunks[8], fb);
+        draw_feedback(frame, chunks[6], fb);
     } else {
-        draw_hint(frame, chunks[8]);
+        draw_hint(frame, chunks[6]);
     }
 }
 
@@ -130,20 +131,18 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
     );
 }
 
-// ── Section label ───────────────────────────────────────────────────────────
-
-fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
-    let line = Line::from(vec![Span::styled(
-        text.to_string(),
-        Style::default().fg(theme::MUTED),
-    )]);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
 // ── Message rows ─────────────────────────────────────────────────────────────
 
 fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
-    let total_w = area.width as usize;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .title(Span::styled(" INBOX ", Style::default().fg(theme::MUTED)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let total_w = inner.width as usize;
 
     const W_MARKER: usize = 2;
     const W_NUMBER: usize = 3;
@@ -151,10 +150,11 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
     const W_GLYPH: usize = 2;
     const TIME_GUTTER: usize = 1;
 
+    let take_n = inner.height as usize;
     let lines: Vec<Line> = state
         .messages
         .iter()
-        .take(7)
+        .take(take_n)
         .enumerate()
         .map(|(i, m)| {
             row_line(
@@ -171,7 +171,7 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,7 +308,11 @@ fn draw_more(frame: &mut Frame, area: Rect, count: u32) {
 
 // ── Input box ────────────────────────────────────────────────────────────────
 
-fn draw_input(frame: &mut Frame, area: Rect) {
+/// Always-live prompt. The buffer comes from `state.command` when typing is
+/// active; otherwise the input shows just the prompt glyph with a blinking
+/// cursor — no placeholder. Matches the Claude Code prompt model: typing is
+/// always captured, `/` triggers an autocomplete popover (rendered separately).
+fn draw_input(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -323,46 +327,10 @@ fn draw_input(frame: &mut Frame, area: Rect) {
         height: 1,
     };
     let prompt = "› ";
-    let placeholder = "Open a message, or type / for commands";
-    let line = Line::from(vec![
-        Span::styled(
-            prompt,
-            Style::default()
-                .fg(theme::SIGNAL_LIGHT)
-                .bg(theme::RECESSED_WELL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            placeholder,
-            Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::RECESSED_WELL)),
-        inner,
-    );
-
-    let cursor_x = inner.x + UnicodeWidthStr::width(prompt) as u16;
-    frame.set_cursor_position((cursor_x, inner.y));
-}
-
-/// Variant used while the slash menu is open — echoes `› /<query>` and
-/// positions the cursor inside it.
-fn draw_input_with_query(frame: &mut Frame, area: Rect, query: &str, cursor: usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::HAIRLINE))
-        .style(Style::default().bg(theme::RECESSED_WELL));
-    frame.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: 1,
+    let (buffer, cursor) = match &state.command {
+        Some(cmd) => (cmd.query.as_str(), cmd.cursor),
+        None => ("", 0),
     };
-    let prompt = "› /";
     let line = Line::from(vec![
         Span::styled(
             prompt,
@@ -372,7 +340,7 @@ fn draw_input_with_query(frame: &mut Frame, area: Rect, query: &str, cursor: usi
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            query.to_string(),
+            buffer.to_string(),
             Style::default()
                 .fg(theme::TEXT)
                 .bg(theme::RECESSED_WELL)
@@ -385,7 +353,7 @@ fn draw_input_with_query(frame: &mut Frame, area: Rect, query: &str, cursor: usi
     );
 
     let prefix_cells = UnicodeWidthStr::width(prompt) as u16;
-    let typed_so_far = &query[..cursor.min(query.len())];
+    let typed_so_far = &buffer[..cursor.min(buffer.len())];
     let typed_cells = UnicodeWidthStr::width(typed_so_far) as u16;
     frame.set_cursor_position((inner.x + prefix_cells + typed_cells, inner.y));
 }
@@ -705,48 +673,37 @@ fn draw_reading_hint(frame: &mut Frame, area: Rect) {
 
 // ── Slash menu overlay ──────────────────────────────────────────────────────
 
+/// Render the slash-command popover **above** the input row, mirroring
+/// Claude Code's `PromptInputHelpMenu`. Only invoked when the prompt buffer
+/// starts with `/` (the caller checks).
 fn draw_command_menu(frame: &mut Frame, _app: &App, cmd: &CommandState, prior: PriorMode) {
     let area = frame.area();
 
-    // Repaint the prompt row with the in-progress query so the user sees
-    // exactly what they're typing.
-    let input_area = match prior {
-        PriorMode::Inbox => {
-            // The inbox uses chunks[7] which has y = 5+1+1+1+7+1+1 = 17, height 3.
-            Rect {
-                x: area.x,
-                y: area.y + 17,
-                width: area.width,
-                height: 3,
-            }
-        }
-        PriorMode::Reading => {
-            // Reading has no dedicated input box; anchor the prompt + popover
-            // near the bottom: 3 rows above the bottom edge so the popover
-            // can drop downward.
-            let y = area.y + area.height.saturating_sub(4);
-            Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: 3,
-            }
-        }
+    // Anchor at the input box. Layout for inbox: chunks[5] starts at
+    //   y = welcome(5) + spacer(1) + rows(9) + more(1) + spacer(1) = 17,
+    //   height 3. For reading, no dedicated input row — anchor near the
+    //   bottom (3 rows above the bottom edge).
+    let input_top = match prior {
+        PriorMode::Inbox => area.y + 17,
+        PriorMode::Reading => area.y + area.height.saturating_sub(4),
     };
-    frame.render_widget(Clear, input_area);
-    draw_input_with_query(frame, input_area, &cmd.query, cmd.cursor);
 
-    // Popover sits just below the input box.
     let max_w = area.width.saturating_sub(4).min(64);
     let visible_rows = cmd.filtered.len() as u16;
     let header = 2u16; // " COMMANDS" + blank
     let footer = 4u16; // blank + "All commands" + names + footer hint
-    let height = (visible_rows + header + footer + 2).min(area.height.saturating_sub(2));
-    let popover_y = input_area.y + input_area.height;
-    let popover_y = popover_y.min(area.y + area.height.saturating_sub(height));
+    let desired_height = visible_rows + header + footer + 2;
+
+    // Float UP from one row above the input. Clamp to the top of the screen.
+    let bottom_y = input_top.saturating_sub(1);
+    let mut top_y = bottom_y.saturating_sub(desired_height.saturating_sub(1));
+    if top_y < area.y {
+        top_y = area.y;
+    }
+    let height = bottom_y.saturating_sub(top_y).saturating_add(1);
     let popover = Rect {
         x: area.x + 2,
-        y: popover_y,
+        y: top_y,
         width: max_w,
         height,
     };

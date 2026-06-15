@@ -898,29 +898,27 @@ impl App {
         }
         let mut action = Action::None;
         if let Some(cmd) = self.state.command.as_mut() {
+            let is_slash = cmd.query.starts_with('/');
             match key.code {
                 KeyCode::Esc => action = Action::Close,
-                KeyCode::Enter if !cmd.filtered.is_empty() => {
+                KeyCode::Enter if is_slash && !cmd.filtered.is_empty() => {
                     action = Action::Run {
                         idx: cmd.filtered[cmd.selected],
                         args: crate::tui::command::split_args(&cmd.query).to_string(),
                     };
                 }
-                KeyCode::Down if !cmd.filtered.is_empty() => {
+                KeyCode::Down if is_slash && !cmd.filtered.is_empty() => {
                     cmd.selected = (cmd.selected + 1).min(cmd.filtered.len() - 1);
                 }
-                KeyCode::Up => cmd.selected = cmd.selected.saturating_sub(1),
-                KeyCode::Char('j')
-                    if cmd.query.is_empty()
-                        && key.modifiers.is_empty()
-                        && !cmd.filtered.is_empty() =>
-                {
-                    cmd.selected = (cmd.selected + 1).min(cmd.filtered.len() - 1);
-                }
-                KeyCode::Char('k') if cmd.query.is_empty() && key.modifiers.is_empty() => {
+                KeyCode::Up if is_slash => {
                     cmd.selected = cmd.selected.saturating_sub(1);
                 }
-                KeyCode::Backspace => cmd.backspace(prior),
+                KeyCode::Backspace => {
+                    cmd.backspace(prior);
+                    if cmd.query.is_empty() {
+                        action = Action::Close;
+                    }
+                }
                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     cmd.push_char(ch, prior);
                 }
@@ -1028,7 +1026,17 @@ impl App {
     // ── Mode transitions ─────────────────────────────────────────
 
     fn open_command_menu(&mut self, prior: PriorMode) {
-        self.state.command = Some(CommandState::empty(prior));
+        self.open_prompt(prior, '/');
+    }
+
+    /// Start typing into the always-live prompt with `seed` as the first char.
+    /// `/` seeds the slash command popover; any other char drops the user into
+    /// a plain text buffer (no popover yet — placeholder for future "ask
+    /// across mail" entry).
+    fn open_prompt(&mut self, prior: PriorMode, seed: char) {
+        let mut cmd = CommandState::empty(prior);
+        cmd.push_char(seed, prior);
+        self.state.command = Some(cmd);
         self.state.mode = Mode::Command { prior };
     }
 

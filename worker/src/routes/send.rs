@@ -109,6 +109,11 @@ struct ValidatedSender {
     from_email: String,
     from_display: String,
     from_domain: String,
+    /// `true` when the request body explicitly set `from.name`. The
+    /// mailbox-record fallback only applies when the caller did NOT
+    /// supply a name — an explicit name (or per-message override) always
+    /// wins.
+    name_from_body: bool,
 }
 
 /// Port of TS `validateSender` (email-helpers.ts:53-71).
@@ -118,15 +123,14 @@ fn validate_sender(
     mailbox_id: &str,
 ) -> std::result::Result<ValidatedSender, String> {
     let to_str = coerce_recipient(to, "to")?.to_lowercase();
-    let (from_email, from_display) = match from {
-        FromField::Plain(s) => (s.to_lowercase(), s.clone()),
+    let (from_email, from_display, name_from_body) = match from {
+        FromField::Plain(s) => (s.to_lowercase(), s.clone(), false),
         FromField::Object { email, name } => {
             let lc = email.to_lowercase();
-            let display = match name {
-                Some(n) if !n.is_empty() => format!("{n} <{email}>"),
-                _ => email.clone(),
-            };
-            (lc, display)
+            match name {
+                Some(n) if !n.trim().is_empty() => (lc, format!("{n} <{email}>"), true),
+                _ => (lc, email.clone(), false),
+            }
         }
     };
     if from_email != mailbox_id.to_lowercase() {
@@ -144,6 +148,7 @@ fn validate_sender(
         from_email,
         from_display,
         from_domain,
+        name_from_body,
     })
 }
 
@@ -216,10 +221,24 @@ async fn send_impl(
     };
 
     // Sender validation.
-    let sender = match validate_sender(&body.to, &body.from, &mailbox_id) {
+    let mut sender = match validate_sender(&body.to, &body.from, &mailbox_id) {
         Ok(s) => s,
         Err(e) => return bad_request(&e),
     };
+
+    // If the body didn't carry an explicit display name, fall back to the
+    // mailbox-record default. The R2 read is cheap (it's a tiny JSON marker)
+    // and only happens once per send.
+    if !sender.name_from_body {
+        if let Some(rec) = mailbox::load_record(&ctx.env, &mailbox_id).await? {
+            if let Some(name) = rec.display_name.as_deref() {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    sender.from_display = format!("{trimmed} <{}>", sender.from_email);
+                }
+            }
+        }
+    }
 
     let cc_str = match coerce_optional_recipient(&body.cc, "cc") {
         Ok(v) => v,

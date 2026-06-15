@@ -24,6 +24,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .get_async("/api/v1/cli/me", routes::cli::me)
         .post_async("/api/v1/cli/mailboxes", routes::cli::create_mailbox)
+        .put_async(
+            "/api/v1/cli/mailboxes/:mailboxId",
+            routes::cli::update_mailbox,
+        )
+        .delete_async(
+            "/api/v1/cli/mailboxes/:mailboxId",
+            routes::cli::delete_mailbox,
+        )
         .get_async("/api/v1/mailboxes/:mailboxId/emails", routes::emails::list)
         .get_async(
             "/api/v1/mailboxes/:mailboxId/emails/:emailId",
@@ -73,11 +81,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 }
 
 #[event(email)]
-async fn email_handler(
-    message: ForwardableEmailMessage,
-    env: Env,
-    ctx: Context,
-) -> Result<()> {
+async fn email_handler(message: ForwardableEmailMessage, env: Env, ctx: Context) -> Result<()> {
     console_error_panic_hook::set_once();
     inbound::receive_email(message, env, ctx).await
 }

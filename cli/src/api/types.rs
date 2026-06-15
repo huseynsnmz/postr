@@ -23,6 +23,10 @@ pub struct CliMailbox {
     pub id: String,
     /// Worker returns `address` here (not `email`).
     pub address: String,
+    /// Personal name used in outbound `From:` headers, e.g.
+    /// `"Hüseyin Sönmez" <me@x.com>`. None ⇒ bare address.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 // ── /api/v1/mailboxes ──────────────────────────────────────────────

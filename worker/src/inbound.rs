@@ -95,7 +95,10 @@ async fn receive_email_inner(message: ForwardableEmailMessage, env: Env) -> Resu
             .collect(),
         _ => Vec::new(),
     };
-    let original_message_id = parsed.message_id().map(extract_msg_id).filter(|s| !s.is_empty());
+    let original_message_id = parsed
+        .message_id()
+        .map(extract_msg_id)
+        .filter(|s| !s.is_empty());
 
     // Resolve mailbox (TS:354-364).
     let allowed = allowed_addresses(&env);

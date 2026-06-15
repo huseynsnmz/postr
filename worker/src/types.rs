@@ -25,6 +25,10 @@ pub struct MailboxBrief {
     /// CLI client expects `address` (not `email`) — see
     /// cli/src/api/types.rs::CliMailbox.
     pub address: String,
+    /// Personal name to attach to outbound `From:` headers, e.g.
+    /// `"Hüseyin Sönmez" <me@x.com>`. None ⇒ bare address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 // ── Email rows (list + single) ─────────────────────────────────────

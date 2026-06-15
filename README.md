@@ -38,11 +38,11 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
    ```bash
    cd ../cli && cargo build --release
    ./target/release/postr login https://<your-worker>.workers.dev
-   ./target/release/postr add-mailbox me@yourdomain.com   # one-time per address
+   ./target/release/postr mailbox add me@yourdomain.com --name "Your Name"
    ./target/release/postr tui
    ```
 
-   `add-mailbox` writes the marker R2 object the worker checks for; the address must be on a domain whose Email Routing forwards to this worker.
+   `mailbox add` writes the marker R2 object the worker checks for; the address must be on a domain whose Email Routing forwards to this worker. The optional `--name` is attached to outbound `From:` headers, e.g. `"Your Name" <me@yourdomain.com>`. Manage existing mailboxes with `postr mailbox list`, `postr mailbox update <addr> --name "..."`, and `postr mailbox remove <addr>`.
 
 ### Why we pin `worker-build`
 
