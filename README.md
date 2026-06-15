@@ -15,9 +15,7 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 
    ```bash
    cd worker
-   cargo install -q worker-build
-   ./scripts/install-wasm-bindgen-shim.sh   # see "Build workaround" below
-   worker-build --release
+   ./tools/install.sh     # one-time, installs pinned worker-build into worker/tools/
    npx wrangler deploy
    ```
 
@@ -43,15 +41,15 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
    ./target/release/postr tui
    ```
 
-### Build workaround
+### Why we pin `worker-build`
 
-`worker-build 0.8.5` invokes `wasm-bindgen 0.2.125` with `--force-enable-abort-handler`, which requires an externref table that Rust 1.95's `wasm32-unknown-unknown` doesn't emit. The `worker/scripts/install-wasm-bindgen-shim.sh` installer drops a shim into worker-build's cache that strips the flag. Trade-off: Rust panics surface as raw worker errors instead of going through wasm-bindgen's abort handler. Tracked in [TODO.md](./TODO.md).
+`worker-build 0.8.4` is the sweet spot: it externalizes `cloudflare:email` in its esbuild step (broken in 0.8.1) but doesn't yet pass `--force-enable-abort-handler` to wasm-bindgen (added in 0.8.5, which requires an externref table that Rust's `wasm32-unknown-unknown` doesn't currently emit). `tools/install.sh` drops 0.8.4 into `worker/tools/worker-build/`; `wrangler.jsonc`'s `build.command` points there. Tracked in [TODO.md](./TODO.md).
 
 ### Troubleshooting
 
 1. **`Token rejected.`** — The worker's `CLI_TOKEN` was rotated. Run `postr login` again.
 2. **`Cloudflare Access must be configured in production`** — Set `POLICY_AUD` and `TEAM_DOMAIN` secrets, or set `ENVIRONMENT=development` for local dev.
-3. **`externref table required for catch wrappers`** — Run `./worker/scripts/install-wasm-bindgen-shim.sh` first.
+3. **`Could not resolve "cloudflare:email"` / `externref table required for catch wrappers`** — Run `./worker/tools/install.sh` to (re-)install the pinned `worker-build`.
 4. **Boxes instead of glyphs in the TUI** — Use a Nerd-Font-capable terminal font.
 
 ## Features
