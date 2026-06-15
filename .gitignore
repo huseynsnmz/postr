@@ -17,3 +17,4 @@ worker/tools/worker-build/
 # OS
 .DS_Store
 *.log
+RUST_CLI_HANDOVER.md
