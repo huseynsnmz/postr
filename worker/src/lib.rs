@@ -23,6 +23,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             }))
         })
         .get_async("/api/v1/cli/me", routes::cli::me)
+        .post_async("/api/v1/cli/mailboxes", routes::cli::create_mailbox)
         .get_async("/api/v1/mailboxes/:mailboxId/emails", routes::emails::list)
         .get_async(
             "/api/v1/mailboxes/:mailboxId/emails/:emailId",

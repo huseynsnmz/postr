@@ -33,13 +33,16 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
    npx wrangler secret put CLI_TOKEN
    ```
 
-6. **Build and log in**
+6. **Build, log in, create a mailbox**
 
    ```bash
    cd ../cli && cargo build --release
    ./target/release/postr login https://<your-worker>.workers.dev
+   ./target/release/postr add-mailbox me@yourdomain.com   # one-time per address
    ./target/release/postr tui
    ```
+
+   `add-mailbox` writes the marker R2 object the worker checks for; the address must be on a domain whose Email Routing forwards to this worker.
 
 ### Why we pin `worker-build`
 

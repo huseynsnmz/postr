@@ -24,6 +24,12 @@ enum Cmd {
     Logout,
     /// Print the currently logged-in identity
     Whoami,
+    /// Create a mailbox on the worker (one-time bootstrap per address).
+    /// Becomes the default mailbox if none is set yet.
+    AddMailbox {
+        /// Email address to receive mail at, e.g. me@yourdomain.com
+        address: String,
+    },
     /// Launch the TUI (default)
     Tui,
 }
@@ -39,6 +45,7 @@ async fn main() -> Result<()> {
         Cmd::Login { url, token } => login(url, token).await,
         Cmd::Logout => logout(),
         Cmd::Whoami => whoami().await,
+        Cmd::AddMailbox { address } => add_mailbox(address).await,
         Cmd::Tui => tui_entry().await,
     }
 }
@@ -95,6 +102,27 @@ fn logout() -> Result<()> {
     kr::delete_token()?;
     Config::clear()?;
     println!("Logged out.");
+    Ok(())
+}
+
+async fn add_mailbox(address: String) -> Result<()> {
+    let Some(mut cfg) = Config::load()? else {
+        return Err(anyhow!("not logged in — run `postr login <url>` first"));
+    };
+    let Some(token) = kr::load_token()? else {
+        return Err(anyhow!("not logged in — run `postr login <url>` first"));
+    };
+    let client = ApiClient::new(&cfg.worker_base_url, &token)?;
+    let mb = client.create_mailbox(&address).await?;
+    println!("Mailbox: {} ({})", mb.address, mb.id);
+    if cfg.default_mailbox_id.is_none() {
+        cfg.default_mailbox_id = Some(mb.id.clone());
+        if cfg.email.as_deref().is_none_or(str::is_empty) {
+            cfg.email = Some(mb.address.clone());
+        }
+        cfg.save()?;
+        println!("Set as default mailbox.");
+    }
     Ok(())
 }
 
