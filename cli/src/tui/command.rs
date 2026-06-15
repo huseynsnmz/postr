@@ -154,7 +154,9 @@ pub const FOLDERS: &[Folder] = &[
         label: "Sent",
     },
     Folder {
-        name: "drafts",
+        // The DO stores the drafts folder under id="draft" (singular) —
+        // migration 3 in do_mailbox.rs. The label we display is plural.
+        name: "draft",
         label: "Drafts",
     },
     Folder {

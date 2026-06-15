@@ -32,6 +32,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             "/api/v1/cli/mailboxes/:mailboxId",
             routes::cli::delete_mailbox,
         )
+        .post_async(
+            "/api/v1/cli/mailboxes/:mailboxId/seed_demo",
+            routes::cli::seed_demo,
+        )
         .get_async("/api/v1/mailboxes/:mailboxId/emails", routes::emails::list)
         .get_async(
             "/api/v1/mailboxes/:mailboxId/emails/:emailId",

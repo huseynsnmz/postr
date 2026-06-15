@@ -75,6 +75,22 @@ impl ApiClient {
         let path = format!("/api/v1/cli/mailboxes/{}", mailbox_path_segment(address));
         self.delete(&path).await
     }
+
+    /// Populate the mailbox with a curated demo dataset (for screenshots
+    /// and demos). Idempotent — prior `demo-*` rows are wiped first.
+    pub async fn seed_demo(&self, address: &str) -> Result<u64, ApiError> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            created: u64,
+        }
+        let path = format!(
+            "/api/v1/cli/mailboxes/{}/seed_demo",
+            mailbox_path_segment(address)
+        );
+        let resp: Resp = self.post_empty(&path).await?;
+        Ok(resp.created)
+    }
 }
 
 /// Same escape rules as `api/mailbox.rs::urlencoding` — duplicated here so

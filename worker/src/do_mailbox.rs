@@ -82,6 +82,7 @@ impl DurableObject for MailboxDO {
             }
             (Method::Post, "/rpc/purge_old_trash") => self.rpc_purge_old_trash(&mut req).await,
             (Method::Post, "/rpc/mark_all_read") => self.rpc_mark_all_read(&mut req).await,
+            (Method::Post, "/rpc/seed_demo") => self.rpc_seed_demo(&mut req).await,
             _ => Response::error(format!("MailboxDO: unknown rpc path {path}"), 404),
         }
     }
@@ -872,6 +873,59 @@ impl MailboxDO {
         Response::from_json(&att_rows)
     }
 
+    /// Insert a curated set of demo emails into this mailbox so screenshots
+    /// (and onboarding) have realistic-looking data without round-tripping
+    /// through the real Email Routing path. Idempotent: rows are keyed by
+    /// `demo-{n}-…` ids and existing demo rows are wiped first.
+    async fn rpc_seed_demo(&self, req: &mut Request) -> Result<Response> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            #[serde(default)]
+            recipient: String,
+            #[serde(default = "default_now")]
+            now_iso: String,
+        }
+        fn default_now() -> String {
+            chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        }
+        let args: Args = req.json().await?;
+        let recipient = args.recipient;
+        let sql = self.state.storage().sql();
+
+        // Wipe any prior demo rows so re-seeding stays idempotent.
+        sql.exec("DELETE FROM emails WHERE id LIKE 'demo-%'", None)?;
+        sql.exec("DELETE FROM attachments WHERE email_id LIKE 'demo-%'", None)?;
+
+        let now: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339(&args.now_iso)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+        let rows = demo_rows();
+        for r in &rows {
+            insert_demo_email(&sql, r, &recipient, now)?;
+        }
+        // One demo attachment so the @ glyph is visible in the inbox.
+        if let Some(attach_target) = rows.iter().find(|r| r.id == "demo-04-stripe-invoice") {
+            sql.exec(
+                "INSERT INTO attachments
+                    (id, email_id, filename, mimetype, size, content_id, disposition)
+                 VALUES (?, ?, ?, ?, ?, NULL, 'attachment')",
+                Some(vec![
+                    "demo-att-01".into(),
+                    attach_target.id.into(),
+                    "invoice-2026-06.pdf".into(),
+                    "application/pdf".into(),
+                    243_512_i64.into(),
+                ]),
+            )?;
+        }
+
+        Response::from_json(&serde_json::json!({ "created": rows.len() }))
+    }
+
     /// Flip `read = 1` on every unread email in the given folder. Returns
     /// `{ updated: <count> }` so the route + CLI can flash the actual
     /// number of rows that changed.
@@ -1248,4 +1302,301 @@ fn normalize_subject(input: &str) -> String {
         }
     }
     s.trim().to_lowercase()
+}
+
+// ── Demo seeder ───────────────────────────────────────────────────────
+
+struct DemoRow {
+    id: &'static str,
+    folder: &'static str,
+    subject: &'static str,
+    sender: &'static str,
+    /// Hours before `now` the row should be backdated to.
+    hours_ago: i64,
+    body: &'static str,
+    read: bool,
+    starred: bool,
+    thread_id: Option<&'static str>,
+    in_reply_to: Option<&'static str>,
+}
+
+fn demo_rows() -> Vec<DemoRow> {
+    vec![
+        DemoRow {
+            id: "demo-01-quarterly-review",
+            folder: "inbox",
+            subject: "Re: Q4 planning sync — agenda draft",
+            sender: "founders@upstream.co",
+            hours_ago: 1,
+            body: "Hey — pulled together a draft agenda for tomorrow:\n\n1. Pipeline review (15 min)\n2. Hiring update (10 min)\n3. Open metric: north-star MoM growth\n\nThoughts before I send it to the wider list?\n\n— Sam",
+            read: false,
+            starred: true,
+            thread_id: Some("thread-quarterly"),
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-02-github-pr",
+            folder: "inbox",
+            subject: "[postr] PR #42 ready for review — folder picker",
+            sender: "notifications@github.com",
+            hours_ago: 2,
+            body: "huseynsnmz opened pull request #42:\n\n  feat(tui): folder filter (/folder) + All-mailboxes row\n\n5 commits · 332 additions · 65 deletions\n\nReview at https://github.com/huseynsnmz/postr/pull/42",
+            read: false,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-03-yc-friday",
+            folder: "inbox",
+            subject: "Office hours this Friday?",
+            sender: "alex@yc.com",
+            hours_ago: 4,
+            body: "Hi — saw your demo from last batch dinner, would love to hear how things are going. Open slot Friday 11-12 PT if you can make it.\n\nAlex",
+            read: false,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-04-stripe-invoice",
+            folder: "inbox",
+            subject: "Your invoice from Stripe (paid · $243.51)",
+            sender: "billing@stripe.com",
+            hours_ago: 7,
+            body: "Receipt for June\n\nPlan: Business · $243.51\nPeriod: Jun 1 – Jun 30, 2026\n\nInvoice attached as PDF.",
+            read: false,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-05-mira-followup",
+            folder: "inbox",
+            subject: "thanks for the intro 🙏",
+            sender: "mira@parable.dev",
+            hours_ago: 10,
+            body: "Really appreciate the intro to Patrick — chat was great, lots to chew on. Let me know whenever you want that coffee.\n\n— M",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-06-quarterly-followup",
+            folder: "inbox",
+            subject: "Re: Q4 planning sync — agenda draft",
+            sender: "priya@upstream.co",
+            hours_ago: 11,
+            body: "+1 to Sam's draft — also worth a 5-min slot for the new pricing experiment at the end?",
+            read: true,
+            starred: false,
+            thread_id: Some("thread-quarterly"),
+            in_reply_to: Some("demo-01-quarterly-review"),
+        },
+        DemoRow {
+            id: "demo-07-cf-status",
+            folder: "inbox",
+            subject: "Resolved: Cloudflare Workers — elevated error rates",
+            sender: "status@cloudflarestatus.com",
+            hours_ago: 22,
+            body: "Incident resolved at 18:42 UTC. Workers error rates returned to normal levels. We'll post a full RCA within 72h.",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-08-cron",
+            folder: "inbox",
+            subject: "Daily digest · 6 new repos starred",
+            sender: "digest@github.com",
+            hours_ago: 26,
+            body: "Top: tokio-rs/tokio (+1.2k), cloudflare/workers-rs (+243), ratatui/ratatui (+88) …",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-09-payroll",
+            folder: "inbox",
+            subject: "Action needed: confirm direct deposit by Friday",
+            sender: "support@gusto.com",
+            hours_ago: 36,
+            body: "We weren't able to verify your bank routing — please re-confirm at https://gusto.com/banking before Friday so the payroll run isn't delayed.",
+            read: false,
+            starred: true,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-10-conf-cfp",
+            folder: "inbox",
+            subject: "RustConf 2026 CFP closes in 5 days",
+            sender: "cfp@rustconf.com",
+            hours_ago: 48,
+            body: "Reminder: the CFP closes Friday at midnight UTC. Talks on async runtimes, embedded, and Wasm tooling are especially welcome this year.",
+            read: false,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-11-quarterly-thirdmsg",
+            folder: "inbox",
+            subject: "Re: Q4 planning sync — agenda draft",
+            sender: "founders@upstream.co",
+            hours_ago: 60,
+            body: "Perfect, added the pricing slot. Updated calendar invite incoming.\n\n— Sam",
+            read: true,
+            starred: false,
+            thread_id: Some("thread-quarterly"),
+            in_reply_to: Some("demo-06-quarterly-followup"),
+        },
+        DemoRow {
+            id: "demo-12-newsletter",
+            folder: "inbox",
+            subject: "Issue #218 — five new tools every TUI dev should know",
+            sender: "weekly@console.dev",
+            hours_ago: 90,
+            body: "This week: textual 0.55, gum recipes, ratatui-textarea, fzf-tab tips, and a tour of vhs for terminal recordings.",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-13-archive-onboarding",
+            folder: "archive",
+            subject: "Welcome to postr — get started",
+            sender: "noreply@postr.dev",
+            hours_ago: 360,
+            body: "Press / to open the command popover. Try /summarize on any open thread, or /switch to flip between mailboxes.",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-14-archive-receipt",
+            folder: "archive",
+            subject: "Receipt — Anthropic API · $47.20",
+            sender: "billing@anthropic.com",
+            hours_ago: 720,
+            body: "Charged $47.20 for May usage. Detailed breakdown attached.",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-15-sent-reply",
+            folder: "sent",
+            subject: "Re: thanks for the intro 🙏",
+            sender: "" /* filled below */,
+            hours_ago: 9,
+            body: "Anytime — really glad it landed. Coffee next week?",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-16-drafts-rfc",
+            folder: "draft",
+            subject: "Draft · proposing the multi-account flow",
+            sender: "" /* filled below */,
+            hours_ago: 17,
+            body: "WIP — pasting the design doc inline so I can keep iterating without leaving the buffer…",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-17-trash-recruiter",
+            folder: "trash",
+            subject: "[recruiter] Senior infra role at MetaSuper",
+            sender: "ann@meta-recruit.io",
+            hours_ago: 240,
+            body: "Saw your GitHub — would you be open to a quick chat about a senior infra role?",
+            read: false,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+        DemoRow {
+            id: "demo-18-trash-promo",
+            folder: "trash",
+            subject: "Last day · 40% off annual",
+            sender: "promo@dropletco.com",
+            hours_ago: 360,
+            body: "Final hours to lock in 40% off your annual plan…",
+            read: true,
+            starred: false,
+            thread_id: None,
+            in_reply_to: None,
+        },
+    ]
+}
+
+fn insert_demo_email(
+    sql: &SqlStorage,
+    r: &DemoRow,
+    recipient: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let date = (now - chrono::Duration::hours(r.hours_ago))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let read_val: i64 = if r.read { 1 } else { 0 };
+    let starred_val: i64 = if r.starred { 1 } else { 0 };
+
+    // Sent and Drafts rows belong to the user — override sender when the
+    // fixture leaves it blank so the inbox column reads correctly.
+    let sender: String = if matches!(r.folder, "sent" | "draft") && r.sender.is_empty() {
+        recipient.to_string()
+    } else {
+        r.sender.to_string()
+    };
+    // Reciprocal: outgoing rows go to someone else; inbox/archive/trash
+    // rows are addressed to the user. Use a sensible demo destination so
+    // the reading view's "To" line isn't empty.
+    let row_recipient: String = match r.folder {
+        "sent" => "team@upstream.co".to_string(),
+        "draft" => "founders@upstream.co".to_string(),
+        _ => recipient.to_string(),
+    };
+
+    let in_reply_to: SqlStorageValue = match r.in_reply_to {
+        Some(s) => s.into(),
+        None => SqlStorageValue::Null,
+    };
+    let thread_id: SqlStorageValue = match r.thread_id {
+        Some(s) => s.into(),
+        None => SqlStorageValue::Null,
+    };
+
+    sql.exec(
+        "INSERT INTO emails
+            (id, folder_id, subject, sender, recipient, cc, bcc, date,
+             read, starred, body, in_reply_to, email_references,
+             thread_id, message_id, raw_headers)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL)",
+        Some(vec![
+            r.id.into(),
+            r.folder.into(),
+            r.subject.into(),
+            sender.as_str().into(),
+            row_recipient.as_str().into(),
+            date.as_str().into(),
+            read_val.into(),
+            starred_val.into(),
+            r.body.into(),
+            in_reply_to,
+            thread_id,
+        ]),
+    )?;
+    Ok(())
 }

@@ -142,6 +142,37 @@ pub async fn update_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
     Response::from_json(&brief(&rec))
 }
 
+/// `POST /api/v1/cli/mailboxes/:mailboxId/seed_demo` — drop a curated set
+/// of demo emails into the DO so screenshots have realistic-looking data
+/// without round-tripping through real Email Routing. Idempotent: prior
+/// `demo-*` rows are wiped first. Returns `{ created: N }`.
+pub async fn seed_demo(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    use serde_json::json;
+    if let Err(e) = check_auth(&req, &ctx.env).await {
+        return auth_error_response(e);
+    }
+    let Some(mailbox_id) = ctx.param("mailboxId").cloned() else {
+        return err_response(400, "missing_mailbox_id");
+    };
+    if mailbox::load_record(&ctx.env, &mailbox_id).await?.is_none() {
+        return err_response(404, "mailbox_not_found");
+    }
+    let stub = mailbox::mailbox_stub(&ctx.env, &mailbox_id)?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    let body = json!({ "recipient": mailbox::normalize_mailbox_id(&mailbox_id) });
+    let do_req = Request::new_with_init(
+        "https://do/rpc/seed_demo",
+        RequestInit::new()
+            .with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(body.to_string().into())),
+    )?;
+    let mut resp = stub.fetch_with_request(do_req).await?;
+    let payload: serde_json::Value = resp.json().await?;
+    Response::from_json(&payload)
+}
+
 /// `DELETE /api/v1/cli/mailboxes/:mailboxId` — remove the R2 marker.
 ///
 /// The Durable Object's stored data is left intact. The DO is addressed by

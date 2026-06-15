@@ -27,6 +27,12 @@ enum Cmd {
     /// Manage mailboxes on the worker
     #[command(subcommand)]
     Mailbox(MailboxCmd),
+    /// Populate a mailbox with curated demo data (idempotent). Useful for
+    /// screenshots and quick walkthroughs.
+    DemoSeed {
+        /// Mailbox address to seed (must already exist on the worker)
+        address: String,
+    },
     /// Launch the TUI (default)
     Tui,
 }
@@ -97,6 +103,7 @@ async fn main() -> Result<()> {
         }) => mailbox_update(address, name, clear_name, alias, clear_alias).await,
         Cmd::Mailbox(MailboxCmd::List) => mailbox_list().await,
         Cmd::Mailbox(MailboxCmd::Remove { address }) => mailbox_remove(address).await,
+        Cmd::DemoSeed { address } => demo_seed(address).await,
         Cmd::Tui => tui_entry().await,
     }
 }
@@ -241,6 +248,16 @@ async fn mailbox_list() -> Result<()> {
     for mb in &me.mailboxes {
         println!("  {}", format_name(mb));
     }
+    Ok(())
+}
+
+async fn demo_seed(address: String) -> Result<()> {
+    let (_, client) = require_session()?;
+    let n = client
+        .seed_demo(&address)
+        .await
+        .context("seeding demo data")?;
+    println!("Seeded {n} demo emails into {address}.");
     Ok(())
 }
 
