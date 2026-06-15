@@ -144,8 +144,10 @@ pub async fn update_mailbox(mut req: Request, ctx: RouteContext<()>) -> Result<R
 
 /// `POST /api/v1/cli/mailboxes/:mailboxId/seed_demo` — drop a curated set
 /// of demo emails into the DO so screenshots have realistic-looking data
-/// without round-tripping through real Email Routing. Idempotent: prior
-/// `demo-*` rows are wiped first. Returns `{ created: N }`.
+/// without round-tripping through real Email Routing. Auto-creates the
+/// mailbox marker if it doesn't exist yet (so one command spins up a
+/// fresh demo mailbox end-to-end). Idempotent: prior `demo-*` rows are
+/// wiped first. Returns `{ created: N }`.
 pub async fn seed_demo(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     use serde_json::json;
     if let Err(e) = check_auth(&req, &ctx.env).await {
@@ -154,13 +156,30 @@ pub async fn seed_demo(req: Request, ctx: RouteContext<()>) -> Result<Response> 
     let Some(mailbox_id) = ctx.param("mailboxId").cloned() else {
         return err_response(400, "missing_mailbox_id");
     };
-    if mailbox::load_record(&ctx.env, &mailbox_id).await?.is_none() {
-        return err_response(404, "mailbox_not_found");
+    let normalized = mailbox::normalize_mailbox_id(&mailbox_id);
+    if normalized.is_empty() || !normalized.contains('@') {
+        return err_response(400, "invalid_mailbox_id");
     }
-    let stub = mailbox::mailbox_stub(&ctx.env, &mailbox_id)?;
+    if mailbox::load_record(&ctx.env, &normalized).await?.is_none() {
+        // Auto-create the marker so the demo flow is a single command
+        // even on a fresh mailbox. Name is derived from the local part.
+        let display_name = normalized
+            .split_once('@')
+            .map(|(local, _)| local.to_string());
+        mailbox::save_record(
+            &ctx.env,
+            &MailboxRecord {
+                address: normalized.clone(),
+                display_name,
+                alias: None,
+            },
+        )
+        .await?;
+    }
+    let stub = mailbox::mailbox_stub(&ctx.env, &normalized)?;
     let headers = Headers::new();
     headers.set("Content-Type", "application/json")?;
-    let body = json!({ "recipient": mailbox::normalize_mailbox_id(&mailbox_id) });
+    let body = json!({ "recipient": normalized });
     let do_req = Request::new_with_init(
         "https://do/rpc/seed_demo",
         RequestInit::new()
