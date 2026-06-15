@@ -18,7 +18,11 @@ use crate::tui::app::{AppEvent, ErrorKind};
 /// Route compose-pipeline errors: `Unauthorized` falls through to the
 /// canonical auth-failure flow; everything else surfaces as a flash on
 /// the compose screen via `SendFailed`.
-fn send_compose_error(tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>, prefix: &str, err: ApiError) {
+fn send_compose_error(
+    tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    prefix: &str,
+    err: ApiError,
+) {
     if matches!(err, ApiError::Unauthorized) {
         let _ = tx.send(AppEvent::Error {
             kind: ErrorKind::Unauthorized,
