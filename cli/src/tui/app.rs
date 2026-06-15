@@ -304,6 +304,100 @@ impl App {
         });
     }
 
+    pub fn spawn_mark_read(&self, email_id: String, read: bool, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.mark_read(&mailbox_id, &email_id, read).await {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::ActionDone(
+                        if read { "Marked read" } else { "Marked unread" }.into(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: format!("read flag: {e}"),
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn spawn_mark_all_read(&mut self) {
+        let folder = self.state.folder.clone();
+        let mailbox_id = self.mailbox_id.clone();
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        self.state.flash_info("Marking all read…");
+        tokio::spawn(async move {
+            match client.mark_all_read(&mailbox_id, &folder).await {
+                Ok(n) => {
+                    let summary = if n == 0 {
+                        "Nothing to mark".to_string()
+                    } else {
+                        format!("Marked {n} message(s) read")
+                    };
+                    let _ = tx.send(AppEvent::ActionDone(summary));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: format!("mark-all-read: {e}"),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Toggle the read flag on the inbox row currently in scope. Routes
+    /// over the multi-selection if one is active. `target_read` is the
+    /// desired state — true=read, false=unread.
+    pub fn toggle_read_on_target(&mut self, target_read: bool) {
+        if !self.state.multi_selected.is_empty() {
+            self.batch_mark_read(target_read);
+            return;
+        }
+        if let Some(r) = self.state.reading.as_ref() {
+            let msg = &r.thread[r.message_idx];
+            let id = msg.id.clone();
+            let mb = r.mailbox_id.clone();
+            self.spawn_mark_read(id, target_read, mb);
+            return;
+        }
+        if let Some(m) = self.state.selected_meta().cloned() {
+            if let Some(row) = self.state.messages.get_mut(self.state.selected_index) {
+                row.meta.read = target_read;
+            }
+            self.spawn_mark_read(m.meta.id, target_read, m.mailbox_id);
+        }
+    }
+
+    fn batch_mark_read(&mut self, target_read: bool) {
+        let rows = self.drain_selection();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        for (email_id, mailbox_id) in rows {
+            self.spawn_mark_read_quiet(email_id, target_read, mailbox_id);
+        }
+        self.state.flash_success(if target_read {
+            format!("Marked {n} message(s) read")
+        } else {
+            format!("Marked {n} message(s) unread")
+        });
+    }
+
+    fn spawn_mark_read_quiet(&self, email_id: String, read: bool, mailbox_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = client.mark_read(&mailbox_id, &email_id, read).await;
+            let _ = tx.send(AppEvent::ActionDoneQuiet);
+        });
+    }
+
     pub fn spawn_star(&self, email_id: String, on: bool, mailbox_id: String) {
         let client = self.client.clone();
         let tx = self.tx.clone();
@@ -976,14 +1070,15 @@ impl App {
                     self.state.selected_index = idx;
                 }
             }
-            // Space toggles multi-selection on the highlighted row.
+            // Space toggles multi-selection on the highlighted row. The
+            // cursor stays put — auto-advance felt jumpy when picking a
+            // single row at a time.
             KeyCode::Char(' ') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
                     let id = m.meta.id;
                     if self.state.multi_selected.remove(&id).is_none() {
                         self.state.multi_selected.insert(id, m.mailbox_id);
                     }
-                    self.state.selected_next();
                 }
             }
             // Esc clears the multi-selection. (Inbox has no other Esc binding.)
@@ -1018,6 +1113,16 @@ impl App {
                 }
             }
             KeyCode::Char('u') => self.spawn_undo(),
+            // `m` toggles read state. With a multi-selection, batches over
+            // every row using the highlighted row's state to pick direction.
+            KeyCode::Char('m') => {
+                let direction = self
+                    .state
+                    .selected_meta()
+                    .map(|m| !m.meta.read)
+                    .unwrap_or(true);
+                self.toggle_read_on_target(direction);
+            }
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Inbox),
             KeyCode::Char('c') => self.enter_compose_new(),
             KeyCode::Char('r') => {
@@ -1129,6 +1234,15 @@ impl App {
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Reading),
             KeyCode::Char('r') | KeyCode::Char('a') => self.enter_compose_reply(),
             KeyCode::Char('f') => self.enter_compose_forward(),
+            KeyCode::Char('m') => {
+                let direction = self
+                    .state
+                    .reading
+                    .as_ref()
+                    .map(|r| !r.thread[r.message_idx].read)
+                    .unwrap_or(true);
+                self.toggle_read_on_target(direction);
+            }
             KeyCode::Char('o') => {
                 self.state.flash_info("Link open lands later");
             }
@@ -1358,6 +1472,9 @@ impl App {
             }
             "switch" => self.run_switch(args),
             "folder" => self.run_folder(args),
+            "read" => self.toggle_read_on_target(true),
+            "unread" => self.toggle_read_on_target(false),
+            "mark-all-read" => self.spawn_mark_all_read(),
             "logout" => {
                 self.should_quit = true;
             }

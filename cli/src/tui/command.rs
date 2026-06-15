@@ -108,6 +108,24 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         status: CmdStatus::Active,
     },
     SlashCommand {
+        name: "read",
+        desc: "Mark selected (or open) as read",
+        scope: Scope::Both,
+        status: CmdStatus::Active,
+    },
+    SlashCommand {
+        name: "unread",
+        desc: "Mark selected (or open) as unread",
+        scope: Scope::Both,
+        status: CmdStatus::Active,
+    },
+    SlashCommand {
+        name: "mark-all-read",
+        desc: "Mark every message in this folder as read",
+        scope: Scope::Inbox,
+        status: CmdStatus::Active,
+    },
+    SlashCommand {
         name: "logout",
         desc: "Sign out",
         scope: Scope::Both,

@@ -179,6 +179,26 @@ impl ApiClient {
 
     // ── Threads ────────────────────────────────────────────────
 
+    /// Flip every unread row in `folder` to read on the worker. Returns
+    /// the number of rows actually changed.
+    pub async fn mark_all_read(&self, mailbox_id: &str, folder: &str) -> Result<u64, ApiError> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            folder: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            updated: u64,
+        }
+        let path = format!(
+            "/api/v1/mailboxes/{}/mark_all_read",
+            urlencoding(mailbox_id)
+        );
+        let resp: Resp = self.post_json(&path, &Body { folder }).await?;
+        Ok(resp.updated)
+    }
+
     pub async fn mark_thread_read(
         &self,
         mailbox_id: &str,

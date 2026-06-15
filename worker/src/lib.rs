@@ -50,6 +50,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             routes::emails::move_to,
         )
         .post_async(
+            "/api/v1/mailboxes/:mailboxId/mark_all_read",
+            routes::emails::mark_all_read,
+        )
+        .post_async(
             "/api/v1/mailboxes/:mailboxId/emails",
             routes::send::send_fresh,
         )

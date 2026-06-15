@@ -226,6 +226,42 @@ struct MoveBody {
     folder_id: String,
 }
 
+/// `POST /api/v1/mailboxes/:mailboxId/mark_all_read` — flip every unread row
+/// in the folder named by the JSON body (`{"folder": "inbox"}`). Returns
+/// `{"updated": N}` so the CLI can flash how many rows changed.
+pub async fn mark_all_read(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if let Err(e) = check_auth(&req, &ctx.env).await {
+        return auth_error_response(e);
+    }
+    let Some(mailbox_id) = ctx.param("mailboxId").cloned() else {
+        return bad_request("missing mailboxId");
+    };
+    if !mailbox::require_mailbox(&ctx.env, &mailbox_id).await? {
+        return not_found("Not found");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        #[serde(default = "default_folder")]
+        folder: String,
+    }
+    fn default_folder() -> String {
+        "inbox".into()
+    }
+    let body: Body = match req.json().await {
+        Ok(b) => b,
+        Err(_) => Body {
+            folder: default_folder(),
+        },
+    };
+
+    let stub = mailbox::mailbox_stub(&ctx.env, &mailbox_id)?;
+    let do_req = do_rpc_request("/rpc/mark_all_read", &json!({ "folder": body.folder }))?;
+    let mut resp = stub.fetch_with_request(do_req).await?;
+    let payload: serde_json::Value = resp.json().await?;
+    Response::from_json(&payload)
+}
+
 pub async fn move_to(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     if let Err(e) = check_auth(&req, &ctx.env).await {
         return auth_error_response(e);

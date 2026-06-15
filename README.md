@@ -58,10 +58,27 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 ## Features
 
 - **Keyboard-first TUI** — single scroll buffer, `›` prompt, slash commands, no mouse
-- **Full email client** — send and receive via Email Routing with reply/forward threading, folders, search, and attachment metadata
-- **Per-mailbox isolation** — each mailbox runs in its own Durable Object with `state.storage().sql()` + R2 for attachments
+- **Multi-mailbox** — switch with `/switch <addr|alias>`, or `/switch all` for a unified inbox; rows show a `#mailbox` column so you can tell at a glance
+- **Folders** — `/folder` for a picker (inbox, archive, sent, drafts, trash) or `/folder <name>` to jump directly
+- **Soft-delete + 30-day trash** — `d` moves to trash; inside trash the same key permanently purges. A daily cron sweeps trashed messages older than 30 days and frees the R2 attachment blobs
+- **Multi-selection** — `Space` toggles a row, then `s`/`e`/`d`/`m` apply over the whole set; the inbox title shows the count
+- **Read state** — `m` toggles read/unread on the highlighted row (or every selected row); `/mark-all-read` clears the whole folder
+- **Reply + forward** — `r`/`a`/`f` open compose pre-seeded with `On <date>, <sender> wrote:` + quoted body; per-mailbox `--name` populates `From:` for outbound mail
 - **AI slash commands** — `/summarize`, `/draft <prompt>`, `/ask <query>`, `/triage` backed by Workers AI; suggested-reply pills feed straight into compose
+- **Per-mailbox isolation** — each mailbox runs in its own Durable Object with `state.storage().sql()` + R2 for attachments
 - **Bring-your-own-cloud** — runs entirely on your Cloudflare account; no Anthropic, no Gmail, no third-party email server
+
+### Key bindings
+
+| Where | Keys |
+|---|---|
+| Inbox nav | `j`/`k`/`↑`/`↓` select · `1`–`9` jump · `⏎` open · `g`/`G` top/bottom |
+| Inbox actions | `s` star · `e` archive · `d` trash/delete · `m` read · `u` undo · `c` compose · `r` refresh |
+| Multi-select | `Space` toggle · `Esc` clear · `s`/`e`/`d`/`m` batch over selection |
+| Reading | `j`/`k` next/prev message · `z` toggle quoted · `r`/`a` reply · `f` forward · `e`/`d`/`s`/`m` apply to open message |
+| Prompt | `/` opens command popover · type to filter · `⏎` runs · `Esc` clears |
+| Anywhere | `?` shortcuts overlay · `q` back to inbox (and `q` again to quit) · `⌃c` hard quit |
+
 
 ## Stack
 

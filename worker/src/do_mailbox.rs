@@ -81,6 +81,7 @@ impl DurableObject for MailboxDO {
                 self.rpc_find_thread_by_subject(&mut req).await
             }
             (Method::Post, "/rpc/purge_old_trash") => self.rpc_purge_old_trash(&mut req).await,
+            (Method::Post, "/rpc/mark_all_read") => self.rpc_mark_all_read(&mut req).await,
             _ => Response::error(format!("MailboxDO: unknown rpc path {path}"), 404),
         }
     }
@@ -869,6 +870,37 @@ impl MailboxDO {
         )?;
 
         Response::from_json(&att_rows)
+    }
+
+    /// Flip `read = 1` on every unread email in the given folder. Returns
+    /// `{ updated: <count> }` so the route + CLI can flash the actual
+    /// number of rows that changed.
+    async fn rpc_mark_all_read(&self, req: &mut Request) -> Result<Response> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            folder: String,
+        }
+        let args: Args = req.json().await?;
+        let sql_storage = self.state.storage().sql();
+
+        // Count first so the response reflects what actually changed
+        // (post-update SQLite has no rows_changed surface available here).
+        let count_rows: Vec<CountSqlRow> = sql_storage
+            .exec(
+                "SELECT COUNT(1) AS total FROM emails
+                 WHERE folder_id = ? AND read = 0",
+                Some(vec![args.folder.as_str().into()]),
+            )?
+            .to_array()?;
+        let updated = count_rows.first().map(|r| r.total).unwrap_or(0);
+
+        if updated > 0 {
+            sql_storage.exec(
+                "UPDATE emails SET read = 1 WHERE folder_id = ? AND read = 0",
+                Some(vec![args.folder.as_str().into()]),
+            )?;
+        }
+        Response::from_json(&serde_json::json!({ "updated": updated }))
     }
 
     /// Sweep emails out of the `trash` folder that have been sitting there
