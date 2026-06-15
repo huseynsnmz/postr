@@ -96,6 +96,12 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         status: CmdStatus::Active,
     },
     SlashCommand {
+        name: "folder",
+        desc: "Switch folder (inbox / archive / sent / …)",
+        scope: Scope::Both,
+        status: CmdStatus::Active,
+    },
+    SlashCommand {
         name: "refresh",
         desc: "Re-fetch the inbox",
         scope: Scope::Inbox,
@@ -106,6 +112,36 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         desc: "Sign out",
         scope: Scope::Both,
         status: CmdStatus::Active,
+    },
+];
+
+/// Folders the worker recognizes on `GET /emails?folder=<name>`. The first
+/// entry doubles as the default inbox view.
+pub struct Folder {
+    pub name: &'static str,
+    pub label: &'static str,
+}
+
+pub const FOLDERS: &[Folder] = &[
+    Folder {
+        name: "inbox",
+        label: "Inbox",
+    },
+    Folder {
+        name: "archive",
+        label: "Archive",
+    },
+    Folder {
+        name: "sent",
+        label: "Sent",
+    },
+    Folder {
+        name: "drafts",
+        label: "Drafts",
+    },
+    Folder {
+        name: "trash",
+        label: "Trash",
     },
 ];
 

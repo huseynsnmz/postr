@@ -220,8 +220,9 @@ impl App {
     fn spawn_load_single_inbox(&self, mb: String) {
         let client = self.client.clone();
         let tx = self.tx.clone();
+        let folder = self.state.folder.clone();
         tokio::spawn(async move {
-            match client.get_inbox_list(&mb).await {
+            match client.get_inbox_list(&mb, &folder).await {
                 Ok(list) => {
                     let _ = tx.send(AppEvent::InboxLoaded(list));
                 }
@@ -238,13 +239,15 @@ impl App {
     fn spawn_load_all_inboxes(&self, ids: Vec<String>) {
         let client = self.client.clone();
         let tx = self.tx.clone();
+        let folder = self.state.folder.clone();
         tokio::spawn(async move {
             // Fan out: each mailbox fetched independently; we tag each with
             // its id so the merge step downstream can attribute rows.
             let futures = ids.into_iter().map(|id| {
                 let client = client.clone();
+                let folder = folder.clone();
                 async move {
-                    let result = client.get_inbox_list(&id).await;
+                    let result = client.get_inbox_list(&id, &folder).await;
                     (id, result)
                 }
             });
@@ -459,12 +462,18 @@ impl App {
                 if let Some(picker) = self.state.mailbox_picker.as_mut() {
                     picker.loading = false;
                     let cur = self.mailbox_id.clone();
+                    let cur_is_unified = matches!(self.scope, ActiveScope::All(_));
                     picker.mailboxes = list;
                     picker.refilter();
                     picker.selected = picker
                         .filtered
                         .iter()
-                        .position(|&i| picker.mailboxes[i].id.eq_ignore_ascii_case(&cur))
+                        .position(|entry| match entry {
+                            crate::state::MailboxPickerEntry::All => cur_is_unified,
+                            crate::state::MailboxPickerEntry::Mailbox(mb) => {
+                                mb.id.eq_ignore_ascii_case(&cur) && !cur_is_unified
+                            }
+                        })
                         .unwrap_or(0);
                 }
             }
@@ -619,10 +628,14 @@ impl App {
             self.should_quit = true;
             return;
         }
-        // The mailbox picker, when open, eats every key so the user can't
-        // accidentally interact with the screen behind it.
+        // Picker overlays eat every key so the user can't accidentally
+        // interact with the screen behind them.
         if self.state.mailbox_picker.is_some() {
             self.handle_key_mailbox_picker(key);
+            return;
+        }
+        if self.state.folder_picker.is_some() {
+            self.handle_key_folder_picker(key);
             return;
         }
         // Bare `q` is the soft-exit key: from non-inbox screens it returns to
@@ -1360,6 +1373,7 @@ impl App {
                 self.spawn_load_inbox();
             }
             "switch" => self.run_switch(args),
+            "folder" => self.run_folder(args),
             "logout" => {
                 self.should_quit = true;
             }
@@ -1510,6 +1524,72 @@ impl App {
         self.spawn_load_mailboxes();
     }
 
+    /// `/folder <name>` switches the folder directly; `/folder` (no args)
+    /// opens a centered picker.
+    fn run_folder(&mut self, args: &str) {
+        let arg = args.trim().to_lowercase();
+        if arg.is_empty() {
+            self.state.folder_picker =
+                Some(crate::state::FolderPickerState::new(&self.state.folder));
+            return;
+        }
+        if !crate::tui::command::FOLDERS.iter().any(|f| f.name == arg) {
+            self.state.flash_error(format!(
+                "Unknown folder '{arg}' — try inbox/archive/sent/drafts/trash"
+            ));
+            return;
+        }
+        self.switch_folder(arg);
+    }
+
+    fn switch_folder(&mut self, folder: String) {
+        if folder == self.state.folder {
+            return;
+        }
+        self.state.folder = folder.clone();
+        self.state.messages.clear();
+        self.state.selected_index = 0;
+        self.state.more_count = 0;
+        self.state.reading = None;
+        self.state.mode = Mode::Loading(LoadingKind::Inbox);
+        self.state.flash_info(format!("Folder: {folder}"));
+        self.spawn_load_inbox();
+    }
+
+    fn handle_key_folder_picker(&mut self, key: KeyEvent) {
+        let folders = crate::tui::command::FOLDERS;
+        let Some(picker) = self.state.folder_picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.state.folder_picker = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                picker.selected = (picker.selected + 1) % folders.len();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                picker.selected = if picker.selected == 0 {
+                    folders.len() - 1
+                } else {
+                    picker.selected - 1
+                };
+            }
+            KeyCode::Char(ch @ '1'..='9') => {
+                let idx = (ch as u8 - b'1') as usize;
+                if idx < folders.len() {
+                    picker.selected = idx;
+                }
+            }
+            KeyCode::Enter => {
+                let name = folders[picker.selected].name.to_string();
+                self.state.folder_picker = None;
+                self.switch_folder(name);
+            }
+            _ => {}
+        }
+    }
+
     fn close_mailbox_picker(&mut self) {
         self.state.mailbox_picker = None;
     }
@@ -1575,17 +1655,19 @@ impl App {
                     picker.refilter();
                     return;
                 }
-                KeyCode::Enter => picker
-                    .filtered
-                    .get(picker.selected)
-                    .and_then(|&i| picker.mailboxes.get(i).cloned()),
+                KeyCode::Enter => picker.filtered.get(picker.selected).cloned(),
                 _ => return,
             }
         };
-        if let Some(mb) = chosen {
+        if let Some(entry) = chosen {
             self.close_mailbox_picker();
-            if let Err(e) = self.set_active_mailbox(mb.id, mb.display_name) {
-                self.state.flash_error(format!("Switch failed: {e}"));
+            match entry {
+                crate::state::MailboxPickerEntry::All => self.enter_unified_inbox(),
+                crate::state::MailboxPickerEntry::Mailbox(mb) => {
+                    if let Err(e) = self.set_active_mailbox(mb.id, mb.display_name) {
+                        self.state.flash_error(format!("Switch failed: {e}"));
+                    }
+                }
             }
         }
     }

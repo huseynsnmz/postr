@@ -59,8 +59,95 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_confirm_overlay(frame);
     }
     if let Some(picker) = app.state.mailbox_picker.as_ref() {
-        draw_mailbox_picker(frame, picker, &app.mailbox_id);
+        draw_mailbox_picker(
+            frame,
+            picker,
+            &app.mailbox_id,
+            matches!(app.scope, crate::tui::app::ActiveScope::All(_)),
+        );
     }
+    if let Some(picker) = app.state.folder_picker.as_ref() {
+        draw_folder_picker(frame, picker, &app.state.folder);
+    }
+}
+
+// ── Folder picker (/folder) ──────────────────────────────────────────────────
+
+fn draw_folder_picker(frame: &mut Frame, picker: &crate::state::FolderPickerState, current: &str) {
+    use crate::tui::command::FOLDERS;
+    let area = frame.area();
+    let w = 40u16.min(area.width.saturating_sub(4));
+    let h = (FOLDERS.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let panel = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, panel);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .style(Style::default().bg(theme::RECESSED_WELL))
+        .title(Span::styled(" FOLDER ", Style::default().fg(theme::MUTED)));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
+    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+    let signal_bold = Style::default()
+        .fg(theme::SIGNAL_LIGHT)
+        .bg(theme::RECESSED_WELL)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, f) in FOLDERS.iter().enumerate() {
+        let selected = i == picker.selected;
+        let active = f.name.eq_ignore_ascii_case(current);
+        let row_bg = if selected {
+            theme::ROW_SELECT
+        } else {
+            theme::RECESSED_WELL
+        };
+        let bar = if selected { "▌" } else { " " };
+        let label_style = if selected {
+            signal_bold.bg(row_bg)
+        } else {
+            text.bg(row_bg)
+        };
+        let suffix = if active { "  · active" } else { "" };
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    bar.to_string(),
+                    Style::default()
+                        .fg(theme::SIGNAL_LIGHT)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {}", f.label), label_style),
+                Span::styled(suffix.to_string(), muted.bg(row_bg)),
+            ])
+            .style(Style::default().bg(row_bg)),
+        );
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" ", muted),
+        Span::styled("↑↓", signal_bold),
+        Span::styled(" pick   ", muted),
+        Span::styled("⏎", signal_bold),
+        Span::styled(" switch   ", muted),
+        Span::styled("esc", signal_bold),
+        Span::styled(" cancel", muted),
+    ]));
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
+        inner,
+    );
 }
 
 // ── Mailbox picker (/switch) ─────────────────────────────────────────────────
@@ -69,6 +156,7 @@ fn draw_mailbox_picker(
     frame: &mut Frame,
     picker: &crate::state::MailboxPickerState,
     current: &str,
+    current_is_all: bool,
 ) {
     let area = frame.area();
     let w = 60u16.min(area.width.saturating_sub(4));
@@ -133,10 +221,8 @@ fn draw_mailbox_picker(
     } else if picker.filtered.is_empty() {
         lines.push(Line::from(Span::styled(" No matches.", muted)));
     } else {
-        for (row_i, &mb_idx) in picker.filtered.iter().enumerate() {
-            let mb = &picker.mailboxes[mb_idx];
+        for (row_i, entry) in picker.filtered.iter().enumerate() {
             let selected = row_i == picker.selected;
-            let active = mb.id.eq_ignore_ascii_case(current);
             let row_bg = if selected {
                 theme::ROW_SELECT
             } else {
@@ -150,32 +236,53 @@ fn draw_mailbox_picker(
                     .bg(row_bg)
                     .add_modifier(Modifier::BOLD),
             );
-            let alias = mb
-                .alias
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|a| format!("[{a}] "))
-                .unwrap_or_default();
-            let line_text = format!(" {alias}{}", mb.address);
-            let line_style = if selected {
-                signal_bold.bg(row_bg)
-            } else {
-                text.bg(row_bg)
-            };
-            let suffix = match (&mb.display_name, active) {
-                (Some(n), true) if !n.is_empty() => format!("  ({n}) · active"),
-                (Some(n), false) if !n.is_empty() => format!("  ({n})"),
-                (_, true) => "  · active".to_string(),
-                _ => String::new(),
-            };
-            lines.push(
-                Line::from(vec![
-                    bar_span,
-                    Span::styled(line_text, line_style),
-                    Span::styled(suffix, muted.bg(row_bg)),
-                ])
-                .style(Style::default().bg(row_bg)),
-            );
+            match entry {
+                crate::state::MailboxPickerEntry::All => {
+                    let line_style = if selected {
+                        signal_bold.bg(row_bg)
+                    } else {
+                        text.bg(row_bg)
+                    };
+                    let suffix = if current_is_all { "  · active" } else { "" };
+                    lines.push(
+                        Line::from(vec![
+                            bar_span,
+                            Span::styled(" All mailboxes".to_string(), line_style),
+                            Span::styled(suffix.to_string(), muted.bg(row_bg)),
+                        ])
+                        .style(Style::default().bg(row_bg)),
+                    );
+                }
+                crate::state::MailboxPickerEntry::Mailbox(mb) => {
+                    let active = !current_is_all && mb.id.eq_ignore_ascii_case(current);
+                    let alias = mb
+                        .alias
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|a| format!("[{a}] "))
+                        .unwrap_or_default();
+                    let line_text = format!(" {alias}{}", mb.address);
+                    let line_style = if selected {
+                        signal_bold.bg(row_bg)
+                    } else {
+                        text.bg(row_bg)
+                    };
+                    let suffix = match (&mb.display_name, active) {
+                        (Some(n), true) if !n.is_empty() => format!("  ({n}) · active"),
+                        (Some(n), false) if !n.is_empty() => format!("  ({n})"),
+                        (_, true) => "  · active".to_string(),
+                        _ => String::new(),
+                    };
+                    lines.push(
+                        Line::from(vec![
+                            bar_span,
+                            Span::styled(line_text, line_style),
+                            Span::styled(suffix, muted.bg(row_bg)),
+                        ])
+                        .style(Style::default().bg(row_bg)),
+                    );
+                }
+            }
         }
     }
     lines.push(Line::from(""));
@@ -430,9 +537,10 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
 // ── Message rows ─────────────────────────────────────────────────────────────
 
 fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState, unified: bool) {
-    // Block title carries the account email — or "all mailboxes" in unified
-    // mode — so the active scope is visible at a glance.
-    let title = format!(" INBOX · {} ", state.account.email);
+    // Block title carries the folder + account email — or "all mailboxes"
+    // in unified mode — so the active scope is visible at a glance.
+    let folder_label = state.folder.to_uppercase();
+    let title = format!(" {folder_label} · {} ", state.account.email);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

@@ -346,9 +346,38 @@ pub struct AppState {
     /// `true` after the user pressed `q` on the inbox once. A second `q`
     /// quits; any other key clears the flag. Surfaced as a flash hint.
     pub quit_armed: bool,
+    /// Currently displayed folder (`inbox`, `archive`, `sent`, `trash`,
+    /// `drafts`). Driving the inbox loader; `/folder <name>` switches it.
+    pub folder: String,
+    /// `/folder` picker overlay. `Some` while the picker is open.
+    pub folder_picker: Option<FolderPickerState>,
     /// `/switch` mailbox picker. `Some` while the centered overlay is open;
     /// resolved by `j/k/↑/↓` + `Enter` (or `Esc` to cancel).
     pub mailbox_picker: Option<MailboxPickerState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FolderPickerState {
+    /// Index into `FOLDERS` (defined in `tui::command`).
+    pub selected: usize,
+}
+
+impl FolderPickerState {
+    pub fn new(current: &str) -> Self {
+        let selected = crate::tui::command::FOLDERS
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(current))
+            .unwrap_or(0);
+        Self { selected }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MailboxPickerEntry {
+    /// Synthetic "all mailboxes" row — selecting it triggers the unified
+    /// inbox (`ActiveScope::All`). Always shown at the top of the picker.
+    All,
+    Mailbox(crate::api::types::CliMailbox),
 }
 
 #[derive(Debug, Clone)]
@@ -360,8 +389,10 @@ pub struct MailboxPickerState {
     /// Free-text filter; substring-matched against address, alias, and
     /// display name (all case-insensitive).
     pub query: String,
-    /// Indices into `mailboxes` that match `query`. Empty `query` ⇒ all.
-    pub filtered: Vec<usize>,
+    /// Picker entries that match `query`, in display order. Includes the
+    /// synthetic `MailboxPickerEntry::All` row when the query is empty or
+    /// matches "all".
+    pub filtered: Vec<MailboxPickerEntry>,
 }
 
 impl Default for MailboxPickerState {
@@ -384,21 +415,23 @@ impl MailboxPickerState {
     /// Recompute `filtered` from the current `query`. Idempotent.
     pub fn refilter(&mut self) {
         let q = self.query.trim().to_lowercase();
-        self.filtered = self
-            .mailboxes
-            .iter()
-            .enumerate()
-            .filter(|(_, mb)| {
-                if q.is_empty() {
-                    return true;
-                }
-                let addr = mb.address.to_lowercase();
-                let alias = mb.alias.as_deref().unwrap_or("").to_lowercase();
-                let name = mb.display_name.as_deref().unwrap_or("").to_lowercase();
-                addr.contains(&q) || alias.contains(&q) || name.contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let mut out: Vec<MailboxPickerEntry> = Vec::new();
+        // Show the unified-inbox row when the query is empty or matches the
+        // word "all".
+        if q.is_empty() || "all mailboxes".contains(&q) || "all".starts_with(&q) {
+            out.push(MailboxPickerEntry::All);
+        }
+        out.extend(self.mailboxes.iter().filter_map(|mb| {
+            let addr = mb.address.to_lowercase();
+            let alias = mb.alias.as_deref().unwrap_or("").to_lowercase();
+            let name = mb.display_name.as_deref().unwrap_or("").to_lowercase();
+            if q.is_empty() || addr.contains(&q) || alias.contains(&q) || name.contains(&q) {
+                Some(MailboxPickerEntry::Mailbox(mb.clone()))
+            } else {
+                None
+            }
+        }));
+        self.filtered = out;
         if self.selected >= self.filtered.len() {
             self.selected = self.filtered.len().saturating_sub(1);
         }
@@ -438,6 +471,8 @@ impl AppState {
             pending_confirm: None,
             mailbox_picker: None,
             quit_armed: false,
+            folder: "inbox".into(),
+            folder_picker: None,
         }
     }
 

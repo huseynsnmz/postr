@@ -39,11 +39,17 @@ impl ApiClient {
     }
 
     /// Like [`get_inbox`] but returns the full envelope so the caller can
-    /// surface `totalCount` for the "…N more" line.
-    pub async fn get_inbox_list(&self, mailbox_id: &str) -> Result<EmailList, ApiError> {
+    /// surface `totalCount` for the "…N more" line. `folder` selects the
+    /// worker-side bucket (`inbox`, `archive`, `sent`, `drafts`, `trash`).
+    pub async fn get_inbox_list(
+        &self,
+        mailbox_id: &str,
+        folder: &str,
+    ) -> Result<EmailList, ApiError> {
         let path = format!(
-            "/api/v1/mailboxes/{}/emails?folder=inbox&page=1",
+            "/api/v1/mailboxes/{}/emails?folder={}&page=1",
             urlencoding(mailbox_id),
+            urlencoding(folder),
         );
         self.get_json(&path).await
     }
