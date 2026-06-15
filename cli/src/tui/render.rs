@@ -52,6 +52,111 @@ pub fn draw(frame: &mut Frame, app: &App) {
             AiKind::Triage => draw_ai_triage(frame, app),
         },
     }
+    if app.state.show_shortcuts {
+        draw_shortcuts_overlay(frame, &app.state.mode);
+    }
+}
+
+// ── Shortcuts overlay (?) ────────────────────────────────────────────────────
+
+fn draw_shortcuts_overlay(frame: &mut Frame, mode: &Mode) {
+    let area = frame.area();
+
+    let max_w = 80u16.min(area.width.saturating_sub(4));
+    let max_h = 22u16.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(max_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(max_h)) / 2;
+    let panel = Rect {
+        x,
+        y,
+        width: max_w,
+        height: max_h,
+    };
+    frame.render_widget(Clear, panel);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .style(Style::default().bg(theme::RECESSED_WELL))
+        .title(Span::styled(
+            " SHORTCUTS ",
+            Style::default().fg(theme::MUTED),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
+    let key = Style::default()
+        .fg(theme::SIGNAL_LIGHT)
+        .bg(theme::RECESSED_WELL)
+        .add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+
+    let kv = |k: &'static str, v: &'static str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {k:<14}"), key),
+            Span::styled(v.to_string(), text),
+        ])
+    };
+    let hdr =
+        |s: &'static str| -> Line<'static> { Line::from(Span::styled(format!(" {s}"), muted)) };
+
+    let in_reading = matches!(mode, Mode::Reading)
+        || matches!(
+            mode,
+            Mode::Command {
+                prior: PriorMode::Reading
+            }
+        );
+    let in_compose = matches!(mode, Mode::Composing | Mode::ComposeDiscardConfirm);
+
+    let mut lines: Vec<Line> = vec![
+        hdr("Inbox"),
+        kv("j / ↓", "next message"),
+        kv("k / ↑", "previous message"),
+        kv("g / G", "jump to top / bottom"),
+        kv("1–9", "jump to row"),
+        kv("⏎", "open selected"),
+        kv("c", "compose new"),
+        kv("s", "toggle star"),
+        kv("e", "archive"),
+        kv("d", "delete"),
+        kv("u", "undo last archive"),
+        kv("r", "refresh"),
+        kv("/", "open command popover"),
+        kv("?", "this overlay"),
+    ];
+
+    if in_reading || in_compose {
+        lines.push(Line::from(""));
+    }
+    if in_reading {
+        lines.push(hdr("Reading"));
+        lines.push(kv("Esc", "back to inbox"));
+        lines.push(kv("j / k", "scroll / next message"));
+        lines.push(kv("z", "expand / collapse quoted"));
+        lines.push(kv("r / a", "reply / reply all"));
+        lines.push(kv("f", "forward"));
+        lines.push(kv("e / d / s", "archive / delete / star"));
+    }
+    if in_compose {
+        lines.push(hdr("Compose"));
+        lines.push(kv("Tab / ⇧Tab", "next / previous field"));
+        lines.push(kv("⌃⏎", "send (also ⌃S, ⌥⏎)"));
+        lines.push(kv("⌃d", "save draft"));
+        lines.push(kv("Esc", "discard"));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  esc / ?", key),
+        Span::styled(" close", muted),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
+        inner,
+    );
 }
 
 // ── Inbox ────────────────────────────────────────────────────────────────────
@@ -379,6 +484,9 @@ fn draw_hint(frame: &mut Frame, area: Rect) {
         sep.clone(),
         Span::styled("c", key),
         Span::styled(" compose", label),
+        sep.clone(),
+        Span::styled("r", key),
+        Span::styled(" refresh", label),
         sep,
         Span::styled("?", key),
         Span::styled(" shortcuts", label),
@@ -557,17 +665,21 @@ fn draw_reading(frame: &mut Frame, app: &App) {
     }
     frame.render_widget(Paragraph::new(Line::from(meta_spans)), chunks[2]);
 
-    let rule_w = chunks[3].width as usize;
-    let rule = Paragraph::new(Line::from(Span::styled(
-        "─".repeat(rule_w),
-        Style::default().fg(theme::MUTED),
-    )));
-    frame.render_widget(rule, chunks[3]);
+    // chunks[3] is reserved as a hairline gap before the body frame.
+    // We render nothing there — the frame's top border provides the divider.
+
+    let body_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .title(Span::styled(" MESSAGE ", Style::default().fg(theme::MUTED)));
+    let body_area = body_block.inner(chunks[4]);
+    frame.render_widget(body_block, chunks[4]);
 
     let body_lines = build_body_lines(reading);
     frame.render_widget(
         Paragraph::new(body_lines).scroll((reading.scroll, 0)),
-        chunks[4],
+        body_area,
     );
 
     frame.render_widget(Paragraph::new(chip_line()), chunks[6]);
@@ -829,12 +941,21 @@ fn draw_compose(frame: &mut Frame, app: &App) {
     ]);
     frame.render_widget(Paragraph::new(subj_line), chunks[3]);
 
-    let rule_w = chunks[4].width as usize;
-    let rule = Paragraph::new(Line::from(Span::styled(
-        "─".repeat(rule_w),
-        Style::default().fg(theme::MUTED),
-    )));
-    frame.render_widget(rule, chunks[4]);
+    // chunks[4] is reserved as the hairline gap before the body frame.
+    // The frame's top border replaces the explicit rule that used to live here.
+
+    let body_title = match c.kind {
+        ComposeKind::New => " COMPOSE ",
+        ComposeKind::Reply { .. } => " REPLY ",
+        ComposeKind::Forward { .. } => " FORWARD ",
+    };
+    let body_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .title(Span::styled(body_title, Style::default().fg(theme::MUTED)));
+    let body_area = body_block.inner(chunks[5]);
+    frame.render_widget(body_block, chunks[5]);
 
     // Body via tui_textarea. Hide cursor when body is not focused.
     let mut body_clone = c.body.clone();
@@ -848,7 +969,7 @@ fn draw_compose(frame: &mut Frame, app: &App) {
     } else {
         body_clone.set_cursor_style(Style::default());
     }
-    frame.render_widget(&body_clone, chunks[5]);
+    frame.render_widget(&body_clone, body_area);
 
     // Chip row.
     frame.render_widget(Paragraph::new(compose_chip_line(c)), chunks[7]);

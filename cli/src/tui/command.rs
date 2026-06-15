@@ -90,6 +90,12 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         status: CmdStatus::Active,
     },
     SlashCommand {
+        name: "refresh",
+        desc: "Re-fetch the inbox",
+        scope: Scope::Inbox,
+        status: CmdStatus::Active,
+    },
+    SlashCommand {
         name: "logout",
         desc: "Sign out",
         scope: Scope::Both,

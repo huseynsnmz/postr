@@ -321,6 +321,11 @@ pub struct AppState {
     /// after 30 s via `clear_undo_if_expired` or when a conflicting flow
     /// (e.g. opening a different email) overwrites it.
     pub last_undoable: Option<UndoableAction>,
+    /// `?` shortcuts overlay. Floats on top of whatever the current mode is
+    /// drawing; closes on `?` again or `Esc`. Stays a flat bool instead of a
+    /// new Mode variant because every screen can show it without otherwise
+    /// changing modes.
+    pub show_shortcuts: bool,
 }
 
 impl AppState {
@@ -338,6 +343,7 @@ impl AppState {
             body_wrap_width: 80,
             ai: None,
             last_undoable: None,
+            show_shortcuts: false,
         }
     }
 

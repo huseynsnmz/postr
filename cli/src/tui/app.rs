@@ -760,6 +760,18 @@ impl App {
     }
 
     fn handle_key_inbox(&mut self, key: KeyEvent) {
+        if self.state.show_shortcuts {
+            // Any key dismisses the overlay; '?' re-opens, so swallow it
+            // here too and let the user toggle.
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
+                self.state.show_shortcuts = false;
+            }
+            return;
+        }
+        if let KeyCode::Char('?') = key.code {
+            self.state.show_shortcuts = true;
+            return;
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.state.selected_next(),
             KeyCode::Char('k') | KeyCode::Up => self.state.selected_prev(),
@@ -796,7 +808,11 @@ impl App {
             KeyCode::Char('u') => self.spawn_undo(),
             KeyCode::Char('/') => self.open_command_menu(PriorMode::Inbox),
             KeyCode::Char('c') => self.enter_compose_new(),
-            KeyCode::Char('r') | KeyCode::Char('a') | KeyCode::Char('f') => {
+            KeyCode::Char('r') => {
+                self.state.flash_info("Refreshing…");
+                self.spawn_load_inbox();
+            }
+            KeyCode::Char('a') | KeyCode::Char('f') => {
                 self.state.flash_info("Open a message first");
             }
             _ => {}
@@ -804,6 +820,16 @@ impl App {
     }
 
     fn handle_key_reading(&mut self, key: KeyEvent) {
+        if self.state.show_shortcuts {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
+                self.state.show_shortcuts = false;
+            }
+            return;
+        }
+        if let KeyCode::Char('?') = key.code {
+            self.state.show_shortcuts = true;
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.state.mode = Mode::Inbox;
@@ -1099,6 +1125,10 @@ impl App {
             "draft" => self.run_draft(args),
             "ask" => self.run_ask(args),
             "triage" => self.run_triage(),
+            "refresh" => {
+                self.state.flash_info("Refreshing…");
+                self.spawn_load_inbox();
+            }
             "logout" => {
                 self.should_quit = true;
             }
