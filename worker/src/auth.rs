@@ -1,15 +1,11 @@
-//! Bearer-token check for the CLI client. Port of the bearer arm of
-//! `worker/workers/lib/api-auth.ts:38-50` (the CF Access JWT arm is
-//! deferred to a later workflow — see TODO below).
+//! Bearer-token check for the CLI client.
 //!
-//! Failure modes (mirrored from the TS handler):
+//! Failure modes:
 //!   * Missing `CLI_TOKEN` secret -> 500 server_misconfigured
 //!   * Bearer token mismatch       -> 401 unauthorized
 //!   * No Authorization header AND ENVIRONMENT != "production" -> pass
-//!     through (dev bypass)
+//!     through (dev bypass for local `wrangler dev`)
 //!   * No Authorization header in production -> 401 unauthorized
-//!     (the TS worker would reach the CF Access path here; we don't
-//!     verify JWTs yet, so we fail closed.)
 
 use worker::{Env, Error, Request, Response, Result};
 
@@ -46,10 +42,7 @@ pub async fn check_auth(req: &Request, env: &Env) -> Result<()> {
         return Ok(());
     }
 
-    // Path 3: CF Access JWT verification — not implemented yet.
-    // TODO(next workflow): port `jwtVerify` against the JWKS at
-    // `{TEAM_DOMAIN}/cdn-cgi/access/certs` with audience POLICY_AUD.
-    // For now production requests without a Bearer fail closed.
+    // Production requires a Bearer on every request.
     Err(Error::RustError(ERR_UNAUTHORIZED.into()))
 }
 

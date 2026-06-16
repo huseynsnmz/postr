@@ -22,19 +22,17 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 
    You'll be prompted for `DOMAINS` — the domain you want to receive mail for.
 
-2. **Make sure Cloudflare Access is off** for this worker — Settings → Cloudflare Access toggle. postr has no web UI and authenticates the CLI with a bearer token (step 5), so Access would just block the CLI at the edge. If you want Access on later for a web UI, add a **Bypass** policy for path `/api/v1/*` so CLI routes reach the worker.
+2. **Set up Email Routing** — Create a catch-all rule on your domain that forwards to this worker.
 
-3. **Set up Email Routing** — Create a catch-all rule on your domain that forwards to this worker.
+3. **Enable Email Service** — The worker needs the `send_email` binding for outbound mail. See [Email Service docs](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/).
 
-4. **Enable Email Service** — The worker needs the `send_email` binding for outbound mail. See [Email Service docs](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/).
-
-5. **Set the CLI token**
+4. **Set the CLI token**
 
    ```bash
    npx wrangler secret put CLI_TOKEN
    ```
 
-6. **Build, log in, create a mailbox**
+5. **Build, log in, create a mailbox**
 
    ```bash
    cd ../cli && cargo build --release
@@ -54,9 +52,8 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 ### Troubleshooting
 
 1. **`Token rejected.`** — The worker's `CLI_TOKEN` was rotated. Run `postr login` again.
-2. **`302 → cloudflareaccess.com/cdn-cgi/access/login`** — Cloudflare Access is enabled on the worker and intercepting at the edge. Turn Access off for this worker, or add a Bypass policy for `/api/v1/*`. (See step 2 above.)
-3. **`Could not resolve "cloudflare:email"` / `externref table required for catch wrappers`** — Run `./worker/tools/install.sh` to (re-)install the pinned `worker-build`.
-4. **Boxes instead of glyphs in the TUI** — Use a Nerd-Font-capable terminal font.
+2. **`Could not resolve "cloudflare:email"` / `externref table required for catch wrappers`** — Run `./worker/tools/install.sh` to (re-)install the pinned `worker-build`.
+3. **Boxes instead of glyphs in the TUI** — Use a Nerd-Font-capable terminal font.
 
 ## Features
 
@@ -89,7 +86,7 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 - **Worker:** Rust, [`workers-rs`](https://github.com/cloudflare/workers-rs) 0.8.5, `mail-parser`, hand-rolled `worker::Router` (no Hono)
 - **Storage:** Durable Object SQLite (one DB per mailbox, 8 migrations preserved from agentic-inbox) + R2 attachments
 - **AI:** Workers AI — `@cf/moonshotai/kimi-k2.5` (summarize/draft/triage) + `@cf/meta/llama-4-scout-17b-16e-instruct` (ask filter inference)
-- **Auth:** Bearer token for the CLI; Cloudflare Access JWT for browser callers (TODO in the Rust worker)
+- **Auth:** Bearer token for the CLI (`CLI_TOKEN` set via `wrangler secret put`)
 
 ## Getting started
 
@@ -100,7 +97,6 @@ After deploying the worker, run `postr login <worker-url>` then `postr tui`. Pre
 - Cloudflare account with a domain
 - [Email Routing](https://developers.cloudflare.com/email-routing/) + [Email Service](https://developers.cloudflare.com/email-service/) enabled
 - [Workers AI](https://developers.cloudflare.com/workers-ai/) enabled
-- [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) configured for production
 - Rust 1.95+ with the `wasm32-unknown-unknown` target
 - A truecolor terminal with a Nerd-Font-capable monospace font
 

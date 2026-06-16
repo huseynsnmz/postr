@@ -17,14 +17,12 @@
 		"nodejs_compat"
 	],
 	"vars": {
-		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
-		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
-		// The worker now fails closed outside local development if Access is not configured.
 		"DOMAINS": "example.com",
 		"EMAIL_ADDRESSES": [],
-		// "development" bypasses Cloudflare Access for web routes; CLI bearer is
-		// still required. Override to "production" in prod deploys.
-		// CLI_TOKEN is a secret — set via `wrangler secret put CLI_TOKEN`, not here.
+		// "development" lets requests through without a Bearer (for local
+		// wrangler dev). "production" requires a valid Bearer on every
+		// /api/v1/* request. CLI_TOKEN is a secret — set via
+		// `wrangler secret put CLI_TOKEN`, not here.
 		"ENVIRONMENT": "development"
 	},
 	"send_email": [
