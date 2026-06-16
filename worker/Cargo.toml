@@ -17,7 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "wasm
 anyhow = "1"
 thiserror = "2"
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 uuid = { version = "1", features = ["v4", "js"] }
 base64 = "0.22"
 mail-parser = "0.11"
