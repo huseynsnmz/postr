@@ -5,24 +5,41 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+# ratatui + crossterm are pinned to the versions tui-textarea 0.7 ships with.
+# The textarea crate hasn't released a ratatui-0.30-compatible version yet
+# (last commit Dec 2024), and bumping ratatui alone splits the type graph
+# (two `Style`/`Widget`s in the dep tree). Bump these together with the next
+# tui-textarea release.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eventsource-stream = "0.2"
 futures-util = "0.3"
-directories = "5"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+directories = "6"
+keyring-core = "1"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-html2text = "0.13"
+html2text = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
 rpassword = "7"
-toml = "0.8"
+toml = "1"
 tui-textarea = "0.7"
 textwrap = "0.16"
+
+# Platform-native keyring backends. keyring-core itself is platform-agnostic;
+# each backend registers itself as the default credential store at startup
+# (see cli/src/config/keyring.rs::init).
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"

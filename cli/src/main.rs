@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
+    kr::init().context("initializing keyring credential store")?;
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Login { url, token } => login(url, token).await,
