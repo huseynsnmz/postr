@@ -104,6 +104,9 @@ pub enum AppEvent {
     /// `/switch all` resolved the mailbox-id list via `/cli/me`; the next
     /// step is to fan out the per-mailbox inbox fetches.
     AllMailboxesResolved(Vec<String>),
+    /// Read-only flash from a background task (e.g. `/whoami`, `/mailbox-list`)
+    /// — shows as an info flash without triggering an inbox reload.
+    Notice(String),
 }
 
 /// Active mailbox scope: a single named mailbox, or the `/switch all`
@@ -558,6 +561,7 @@ impl App {
                 self.state.clear_feedback_if_expired();
                 self.state.clear_undo_if_expired();
             }
+            AppEvent::Notice(s) => self.state.flash_info(s),
             AppEvent::MailboxesLoaded(list) => {
                 if let Some(picker) = self.state.mailbox_picker.as_mut() {
                     picker.loading = false;
@@ -1475,11 +1479,227 @@ impl App {
             "read" => self.toggle_read_on_target(true),
             "unread" => self.toggle_read_on_target(false),
             "mark-all-read" => self.spawn_mark_all_read(),
-            "logout" => {
-                self.should_quit = true;
-            }
+            "logout" => self.run_logout(),
+            "login" => self.run_login(),
+            "whoami" => self.run_whoami(),
+            "mailbox-list" => self.run_mailbox_list(),
+            "mailbox-add" => self.run_mailbox_add(args),
+            "mailbox-update" => self.run_mailbox_update(args),
+            "mailbox-remove" => self.run_mailbox_remove(args),
+            "demo-seed" => self.run_demo_seed(args),
             _ => {}
         }
+    }
+
+    // ── Identity / mailbox CRUD slash commands ───────────────────────
+    //
+    // Thin wrappers around the same `ApiClient` + keyring/config helpers
+    // that `main.rs` uses for the CLI subcommands, exposed as `/whoami`,
+    // `/mailbox-*`, etc. Output one-line — multi-line CLI output is
+    // collapsed into a `·`-separated flash.
+
+    fn run_logout(&mut self) {
+        let _ = crate::config::keyring::delete_token();
+        let _ = crate::config::Config::clear();
+        self.should_quit = true;
+    }
+
+    fn run_login(&mut self) {
+        self.state
+            .flash_info("Run `postr login <url>` from the shell to (re-)authenticate.");
+    }
+
+    fn run_whoami(&mut self) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let url = self.cfg.worker_base_url.clone();
+        tokio::spawn(async move {
+            match client.me().await {
+                Ok(me) => {
+                    let mbs: Vec<String> = me.mailboxes.iter().map(format_mailbox_inline).collect();
+                    let msg = format!("{} · {} · {}", url, me.email, mbs.join(", "));
+                    let _ = tx.send(AppEvent::Notice(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn run_mailbox_list(&mut self) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.list_mailboxes().await {
+                Ok(list) if list.is_empty() => {
+                    let _ = tx.send(AppEvent::Notice("No mailboxes".into()));
+                }
+                Ok(list) => {
+                    let joined = list
+                        .iter()
+                        .map(format_mailbox_inline)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = tx.send(AppEvent::Notice(joined));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn run_mailbox_add(&mut self, args: &str) {
+        let parsed = match SlashArgs::parse(args) {
+            Ok(p) => p,
+            Err(e) => return self.flash_args_error(e),
+        };
+        let Some(address) = parsed.address else {
+            return self.flash_args_error("address required: /mailbox-add <addr>");
+        };
+        let name = parsed.name;
+        let alias = parsed.alias;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client
+                .create_mailbox(&address, name.as_deref(), alias.as_deref())
+                .await
+            {
+                Ok(mb) => {
+                    let _ = tx.send(AppEvent::Notice(format!(
+                        "Added {}",
+                        format_mailbox_inline(&mb)
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn run_mailbox_update(&mut self, args: &str) {
+        let parsed = match SlashArgs::parse(args) {
+            Ok(p) => p,
+            Err(e) => return self.flash_args_error(e),
+        };
+        let Some(address) = parsed.address else {
+            return self.flash_args_error("address required: /mailbox-update <addr> …");
+        };
+        let name_payload: Option<Option<String>> = match (parsed.name, parsed.clear_name) {
+            (None, false) => None,
+            (None, true) => Some(None),
+            (Some(n), _) => Some(Some(n)),
+        };
+        let alias_payload: Option<Option<String>> = match (parsed.alias, parsed.clear_alias) {
+            (None, false) => None,
+            (None, true) => Some(None),
+            (Some(a), _) => Some(Some(a)),
+        };
+        if name_payload.is_none() && alias_payload.is_none() {
+            return self.flash_args_error(
+                "nothing to update — pass --name/--alias or --clear-name/--clear-alias",
+            );
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let name_ref = name_payload.as_ref().map(|o| o.as_deref());
+            let alias_ref = alias_payload.as_ref().map(|o| o.as_deref());
+            match client.update_mailbox(&address, name_ref, alias_ref).await {
+                Ok(mb) => {
+                    let _ = tx.send(AppEvent::Notice(format!(
+                        "Updated {}",
+                        format_mailbox_inline(&mb)
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn run_mailbox_remove(&mut self, args: &str) {
+        let parsed = match SlashArgs::parse(args) {
+            Ok(p) => p,
+            Err(e) => return self.flash_args_error(e),
+        };
+        let Some(address) = parsed.address else {
+            return self.flash_args_error("address required: /mailbox-remove <addr>");
+        };
+        // If we're removing the default mailbox, clear the marker so the next
+        // restart doesn't try to open a dead mailbox. Mirrors `main.rs`.
+        let was_default = self.cfg.default_mailbox_id.as_deref() == Some(address.as_str());
+        if was_default {
+            self.cfg.default_mailbox_id = None;
+            let _ = self.cfg.save();
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.delete_mailbox(&address).await {
+                Ok(()) => {
+                    let msg = if was_default {
+                        format!("Removed {address} (was default — cleared)")
+                    } else {
+                        format!("Removed {address}")
+                    };
+                    let _ = tx.send(AppEvent::Notice(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn run_demo_seed(&mut self, args: &str) {
+        let parsed = match SlashArgs::parse(args) {
+            Ok(p) => p,
+            Err(e) => return self.flash_args_error(e),
+        };
+        let Some(address) = parsed.address else {
+            return self.flash_args_error("address required: /demo-seed <addr>");
+        };
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match client.seed_demo(&address).await {
+                Ok(n) => {
+                    let _ = tx.send(AppEvent::Notice(format!(
+                        "Seeded {n} demo emails into {address}"
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        kind: (&e).into(),
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    fn flash_args_error(&mut self, msg: impl Into<String>) {
+        self.state.flash_error(msg);
     }
 
     fn run_summarize(&mut self) {
@@ -2114,4 +2334,63 @@ fn install_panic_hook() {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original(info);
     }));
+}
+
+// ── Slash-command arg parsing ────────────────────────────────────────
+//
+// The slash command popover hands handlers a single `args: &str` (the
+// substring after the command name). For mailbox CRUD we accept a
+// shell-like form: `<addr> [--name N] [--alias A] [--clear-name]
+// [--clear-alias]`. No quoting — values stop at the next whitespace.
+// Multi-word display names need to be set from the CLI for now.
+
+#[derive(Default)]
+struct SlashArgs {
+    address: Option<String>,
+    name: Option<String>,
+    alias: Option<String>,
+    clear_name: bool,
+    clear_alias: bool,
+}
+
+impl SlashArgs {
+    fn parse(args: &str) -> Result<Self, &'static str> {
+        let mut out = SlashArgs::default();
+        let mut it = args.split_whitespace();
+        while let Some(tok) = it.next() {
+            match tok {
+                "--name" => {
+                    let v = it.next().ok_or("--name needs a value")?;
+                    out.name = Some(v.to_string());
+                }
+                "--alias" => {
+                    let v = it.next().ok_or("--alias needs a value")?;
+                    out.alias = Some(v.to_string());
+                }
+                "--clear-name" => out.clear_name = true,
+                "--clear-alias" => out.clear_alias = true,
+                s if s.starts_with("--") => return Err("unknown flag"),
+                s => {
+                    if out.address.is_some() {
+                        return Err("unexpected extra positional arg");
+                    }
+                    out.address = Some(s.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn format_mailbox_inline(mb: &crate::api::types::CliMailbox) -> String {
+    let alias = mb
+        .alias
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|a| format!(" [{a}]"))
+        .unwrap_or_default();
+    match mb.display_name.as_deref().filter(|s| !s.is_empty()) {
+        Some(n) => format!("{} <{}>{alias}", n, mb.address),
+        None => format!("{}{alias}", mb.address),
+    }
 }
