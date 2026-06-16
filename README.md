@@ -1,5 +1,4 @@
 <div align="center">
-  <img src="./docs/postr-logomark.png" alt="postr logo" width="96" height="96">
   <h1>postr</h1>
   <p><em>A keyboard-first email TUI with an AI agent, running entirely on Cloudflare Workers</em></p>
   <img src="./docs/main.png" alt="postr inbox view" width="800">
