@@ -77,6 +77,57 @@ fn encode_subject(subject: &str) -> String {
     format!("=?utf-8?B?{}?=", B64.encode(subject.as_bytes()))
 }
 
+/// Build an RFC 5322 address: `name <local@domain>` if a display name is
+/// present, else the bare address.
+///
+/// Encoding rules:
+///   * Empty/whitespace name → bare address.
+///   * ASCII name with RFC 5322 "specials" (`(`, `)`, `<`, `>`, `,`, etc.)
+///     → quoted-string with `\\`/`"` escaping.
+///   * ASCII name without specials → bare.
+///   * Non-ASCII name → RFC 2047 base64 encoded-word.
+///
+/// Strict receivers down-rank messages where the From header isn't a
+/// well-formed RFC 5322 address (this is the spec-compliance side of
+/// reputation — receivers can't validate alignment if they can't parse
+/// the header).
+pub fn format_from(name: &str, email: &str) -> String {
+    let n = name.trim();
+    if n.is_empty() {
+        return email.to_string();
+    }
+    let encoded = if n.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        if n.bytes().any(is_address_special) {
+            format!("\"{}\"", n.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            n.to_string()
+        }
+    } else {
+        format!("=?utf-8?B?{}?=", B64.encode(n.as_bytes()))
+    };
+    format!("{encoded} <{email}>")
+}
+
+/// RFC 5322 §3.2.3 "specials" (subset that matters in a display-name
+/// context — the rest are already handled by the ASCII range check).
+fn is_address_special(b: u8) -> bool {
+    matches!(
+        b,
+        b'(' | b')'
+            | b'<'
+            | b'>'
+            | b'['
+            | b']'
+            | b':'
+            | b';'
+            | b'@'
+            | b'\\'
+            | b','
+            | b'"'
+            | b'.'
+    )
+}
+
 /// Normalise newlines to CRLF. RFC 5322 forbids lines >998 chars but the
 /// CLI body comes from a TUI editor — practical bodies don't hit that.
 fn normalize_body(body: &str) -> String {
@@ -113,6 +164,19 @@ mod tests {
     fn lf_normalized_to_crlf() {
         assert_eq!(normalize_body("a\nb"), "a\r\nb");
         assert_eq!(normalize_body("a\r\nb"), "a\r\nb");
+    }
+
+    #[test]
+    fn from_bare_ascii_passthrough() {
+        assert_eq!(
+            format_from("Hüseyin", "h@example.com"),
+            "=?utf-8?B?SMO8c2V5aW4=?= <h@example.com>"
+        );
+        assert_eq!(format_from("Jane Doe", "j@x.com"), "Jane Doe <j@x.com>");
+        assert_eq!(format_from("Smith, John", "j@x.com"), "\"Smith, John\" <j@x.com>");
+        assert_eq!(format_from("", "j@x.com"), "j@x.com");
+        assert_eq!(format_from("   ", "j@x.com"), "j@x.com");
+        assert_eq!(format_from("a\"b", "j@x.com"), "\"a\\\"b\" <j@x.com>");
     }
 
     #[test]

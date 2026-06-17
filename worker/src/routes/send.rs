@@ -128,7 +128,9 @@ fn validate_sender(
         FromField::Object { email, name } => {
             let lc = email.to_lowercase();
             match name {
-                Some(n) if !n.trim().is_empty() => (lc, format!("{n} <{email}>"), true),
+                Some(n) if !n.trim().is_empty() => {
+                    (lc, crate::routes::mime::format_from(n, email), true)
+                }
                 _ => (lc, email.clone(), false),
             }
         }
@@ -234,7 +236,8 @@ async fn send_impl(
             if let Some(name) = rec.display_name.as_deref() {
                 let trimmed = name.trim();
                 if !trimmed.is_empty() {
-                    sender.from_display = format!("{trimmed} <{}>", sender.from_email);
+                    sender.from_display =
+                        crate::routes::mime::format_from(trimmed, &sender.from_email);
                 }
             }
         }
