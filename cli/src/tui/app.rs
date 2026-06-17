@@ -32,7 +32,7 @@ use crate::tui::command::SLASH_COMMANDS;
 use crate::tui::render;
 
 /// Coarse classification of an `ApiError` so the render loop can branch on
-/// remediation (e.g. `Unauthorized` wipes the keyring) without re-matching
+/// remediation (e.g. `Unauthorized` deletes the stored token) without re-matching
 /// on the underlying `ApiError` variant.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
@@ -584,13 +584,13 @@ impl App {
         }
     }
 
-    /// Token rejected by the Worker. Wipe the keyring entry and lock the
+    /// Token rejected by the Worker. Delete the stored token and lock the
     /// TUI on an Error screen with explicit remediation. Don't auto-quit —
     /// let the user read it, then press Esc/q.
     fn handle_auth_failure(&mut self) {
-        // Best-effort: if keyring access fails we still want the error
+        // Best-effort: if file write fails we still want the error
         // screen, so swallow the result.
-        let _ = crate::config::keyring::delete_token();
+        let _ = crate::config::delete_token();
         self.state.mode = Mode::Error(
             "Token rejected. Quit (q) and run `postr login <url>` again to re-authenticate."
                 .to_string(),
@@ -786,7 +786,7 @@ impl App {
                         // If the token was just wiped (auth failure), the
                         // next inbox load would fail immediately. Quit
                         // instead so the user can re-login.
-                        match crate::config::keyring::load_token() {
+                        match crate::config::load_token() {
                             Ok(Some(_)) => {
                                 self.state.mode = Mode::Loading(LoadingKind::Inbox);
                                 self.spawn_load_inbox();
@@ -1493,13 +1493,13 @@ impl App {
 
     // ── Identity / mailbox CRUD slash commands ───────────────────────
     //
-    // Thin wrappers around the same `ApiClient` + keyring/config helpers
+    // Thin wrappers around the same `ApiClient` + config helpers
     // that `main.rs` uses for the CLI subcommands, exposed as `/whoami`,
     // `/mailbox-*`, etc. Output one-line — multi-line CLI output is
     // collapsed into a `·`-separated flash.
 
     fn run_logout(&mut self) {
-        let _ = crate::config::keyring::delete_token();
+        let _ = crate::config::delete_token();
         let _ = crate::config::Config::clear();
         self.should_quit = true;
     }

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use postr::api::ApiClient;
-use postr::config::{keyring as kr, Config};
+use postr::config::{self, Config};
 
 #[derive(Parser)]
 #[command(name = "postr", version, about = "postr — Cloudflare-hosted email TUI")]
@@ -84,7 +84,6 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
-    kr::init().context("initializing keyring credential store")?;
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Login { url, token } => login(url, token).await,
@@ -114,7 +113,7 @@ async fn tui_entry() -> Result<()> {
         eprintln!("Not logged in. Run `postr login <url>` first.");
         std::process::exit(1);
     };
-    let Some(token) = kr::load_token()? else {
+    let Some(token) = config::load_token()? else {
         eprintln!("Not logged in. Run `postr login <url>` first.");
         std::process::exit(1);
     };
@@ -140,11 +139,11 @@ async fn login(url: String, token_arg: Option<String>) -> Result<()> {
     let client = ApiClient::new(&url, &token)?;
     let me = client.me().await.context("calling /cli/me")?;
 
-    kr::save_token(&token)?;
     let cfg = Config {
         worker_base_url: url.clone(),
         email: Some(me.email.clone()),
         default_mailbox_id: me.mailboxes.first().map(|m| m.id.clone()),
+        token: Some(token),
     };
     cfg.save()?;
 
@@ -158,7 +157,7 @@ async fn login(url: String, token_arg: Option<String>) -> Result<()> {
 }
 
 fn logout() -> Result<()> {
-    kr::delete_token()?;
+    config::delete_token()?;
     Config::clear()?;
     println!("Logged out.");
     Ok(())
@@ -168,7 +167,7 @@ fn require_session() -> Result<(Config, ApiClient)> {
     let Some(cfg) = Config::load()? else {
         return Err(anyhow!("not logged in — run `postr login <url>` first"));
     };
-    let Some(token) = kr::load_token()? else {
+    let Some(token) = config::load_token()? else {
         return Err(anyhow!("not logged in — run `postr login <url>` first"));
     };
     let client = ApiClient::new(&cfg.worker_base_url, &token)?;
@@ -281,9 +280,9 @@ async fn whoami() -> Result<()> {
     let Some(cfg) = Config::load()? else {
         return Err(anyhow!("not logged in — run `postr login <url>`"));
     };
-    let Some(token) = kr::load_token()? else {
+    let Some(token) = config::load_token()? else {
         return Err(anyhow!(
-            "not logged in — token missing from keyring; run `postr login <url>`"
+            "not logged in — token missing from config; run `postr login <url>`"
         ));
     };
     let client = ApiClient::new(&cfg.worker_base_url, &token)?;
