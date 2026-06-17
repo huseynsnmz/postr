@@ -116,19 +116,12 @@ async fn main() -> Result<()> {
 }
 
 async fn tui_entry() -> Result<()> {
-    let Some(cfg) = Config::load()? else {
-        eprintln!("Not logged in. Run `postr login <url>` first.");
-        std::process::exit(1);
-    };
-    let Some(token) = config::load_token()? else {
-        eprintln!("Not logged in. Run `postr login <url>` first.");
-        std::process::exit(1);
-    };
-    if cfg.default_mailbox_id.is_none() {
-        return Err(anyhow!(
-            "no default mailbox in config — run `postr login` again"
-        ));
-    }
+    // The TUI launches even without a saved session — `/login` inside the
+    // TUI walks the user through authenticating. An empty cfg + empty token
+    // means the welcome screen prompts for login on first paint; once
+    // `/login` completes, the App hot-swaps the client and loads the inbox.
+    let cfg = Config::load()?.unwrap_or_default();
+    let token = config::load_token()?.unwrap_or_default();
     let client = std::sync::Arc::new(ApiClient::new(&cfg.worker_base_url, &token)?);
     postr::tui::app::run(client, cfg).await
 }

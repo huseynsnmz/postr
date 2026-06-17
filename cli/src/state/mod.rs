@@ -355,10 +355,17 @@ pub struct AppState {
     /// `/switch` mailbox picker. `Some` while the centered overlay is open;
     /// resolved by `j/k/↑/↓` + `Enter` (or `Esc` to cancel).
     pub mailbox_picker: Option<MailboxPickerState>,
-    /// Multi-selected email rows keyed by their id, mapped to the owning
-    /// mailbox so unified-inbox batch ops still route per-row. Toggled with
-    /// space; `e`/`d`/`s` operate on the whole set when non-empty.
-    pub multi_selected: std::collections::HashMap<String, String>,
+    /// `/login` prompt overlay. Two-field form (URL then token); takes over
+    /// key handling while visible. Resolved by Enter (validates against
+    /// `/cli/me`) or Esc (cancels).
+    pub login_prompt: Option<LoginPromptState>,
+    /// Multi-selected email rows keyed by `(mailbox_id, email_id)`. The
+    /// mailbox_id is part of the key (not the value) so unified-inbox views
+    /// don't conflate rows whose ids happen to collide across mailboxes —
+    /// e.g. `postr demo-seed` writes deterministic `demo-XX` ids into every
+    /// mailbox it touches. Toggled with space; `e`/`d`/`s` operate on the
+    /// whole set when non-empty.
+    pub multi_selected: std::collections::HashSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +381,40 @@ impl FolderPickerState {
             .position(|f| f.name.eq_ignore_ascii_case(current))
             .unwrap_or(0);
         Self { selected }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginField {
+    Url,
+    Token,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoginPromptState {
+    pub url: String,
+    pub token: String,
+    pub focus: LoginField,
+    /// `true` while the `me()` round-trip is in flight; key handling is
+    /// disabled (except Esc) so the user can't double-submit.
+    pub busy: bool,
+    /// Last error from a failed submit. Cleared on next keystroke.
+    pub error: Option<String>,
+}
+
+impl LoginPromptState {
+    pub fn new(prefill_url: &str) -> Self {
+        Self {
+            url: prefill_url.to_string(),
+            token: String::new(),
+            focus: if prefill_url.is_empty() {
+                LoginField::Url
+            } else {
+                LoginField::Token
+            },
+            busy: false,
+            error: None,
+        }
     }
 }
 
@@ -480,10 +521,11 @@ impl AppState {
             show_shortcuts: false,
             pending_confirm: None,
             mailbox_picker: None,
+            login_prompt: None,
             quit_armed: false,
             folder: "inbox".into(),
             folder_picker: None,
-            multi_selected: std::collections::HashMap::new(),
+            multi_selected: std::collections::HashSet::new(),
         }
     }
 

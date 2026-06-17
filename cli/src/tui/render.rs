@@ -69,6 +69,112 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(picker) = app.state.folder_picker.as_ref() {
         draw_folder_picker(frame, picker, &app.state.folder);
     }
+    if let Some(prompt) = app.state.login_prompt.as_ref() {
+        draw_login_prompt(frame, prompt);
+    }
+}
+
+// ── /login prompt overlay ────────────────────────────────────────────────────
+
+fn draw_login_prompt(frame: &mut Frame, prompt: &crate::state::LoginPromptState) {
+    use crate::state::LoginField;
+    let area = frame.area();
+    let w = 64u16.min(area.width.saturating_sub(4));
+    // 6 = top border + URL row + token row + spacer + hint + bottom border;
+    // +2 when there's an error to show.
+    let extra = if prompt.error.is_some() { 1 } else { 0 } + if prompt.busy { 1 } else { 0 };
+    let h = (8 + extra as u16).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let panel = Rect { x, y, width: w, height: h };
+    frame.render_widget(Clear, panel);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .style(Style::default().bg(theme::RECESSED_WELL))
+        .title(Span::styled(" LOGIN ", Style::default().fg(theme::MUTED)));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let muted = Style::default().fg(theme::MUTED).bg(theme::RECESSED_WELL);
+    let text = Style::default().fg(theme::TEXT).bg(theme::RECESSED_WELL);
+    let bold = text.add_modifier(Modifier::BOLD);
+    let signal_bold = Style::default()
+        .fg(theme::SIGNAL_LIGHT)
+        .bg(theme::RECESSED_WELL)
+        .add_modifier(Modifier::BOLD);
+
+    let focus_marker = |is_focused: bool| -> Span<'static> {
+        if is_focused {
+            Span::styled("▌", signal_bold)
+        } else {
+            Span::styled(" ", muted)
+        }
+    };
+
+    let url_focused = matches!(prompt.focus, LoginField::Url);
+    let url_value = if prompt.url.is_empty() {
+        Span::styled("https://your-worker.workers.dev", muted)
+    } else {
+        Span::styled(prompt.url.clone(), bold)
+    };
+    let url_line = Line::from(vec![
+        focus_marker(url_focused),
+        Span::styled(" Worker URL  ", muted),
+        url_value,
+        if url_focused {
+            Span::styled("▏", signal_bold)
+        } else {
+            Span::styled("", muted)
+        },
+    ]);
+
+    let token_focused = matches!(prompt.focus, LoginField::Token);
+    let masked: String = "•".repeat(prompt.token.chars().count());
+    let token_value = if prompt.token.is_empty() {
+        Span::styled("(paste your CLI_TOKEN)", muted)
+    } else {
+        Span::styled(masked, bold)
+    };
+    let token_line = Line::from(vec![
+        focus_marker(token_focused),
+        Span::styled(" Token       ", muted),
+        token_value,
+        if token_focused {
+            Span::styled("▏", signal_bold)
+        } else {
+            Span::styled("", muted)
+        },
+    ]);
+
+    let mut lines: Vec<Line> = vec![url_line, token_line, Line::from("")];
+    if prompt.busy {
+        lines.push(Line::from(vec![
+            Span::styled("  ⌛ verifying…", muted),
+        ]));
+    }
+    if let Some(err) = prompt.error.as_ref() {
+        lines.push(Line::from(vec![
+            Span::styled("  ", muted),
+            Span::styled(format!("✗ {err}"), Style::default().fg(theme::RED).bg(theme::RECESSED_WELL)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(" ", muted),
+        Span::styled("⇥", signal_bold),
+        Span::styled(" switch field   ", muted),
+        Span::styled("⏎", signal_bold),
+        Span::styled(" submit   ", muted),
+        Span::styled("esc", signal_bold),
+        Span::styled(" cancel", muted),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::RECESSED_WELL)),
+        inner,
+    );
 }
 
 // ── Folder picker (/folder) ──────────────────────────────────────────────────
@@ -516,25 +622,41 @@ fn draw_welcome(frame: &mut Frame, area: Rect, state: &AppState) {
     let text_bold = text.add_modifier(Modifier::BOLD);
 
     let line1 = Line::from(vec![Span::styled("✉  postr v0.1.0", text_bold)]);
-    let line2 = Line::from(vec![Span::styled(
-        format!(
-            "{} · {} unread · {} total · synced {}",
-            state.account.email,
-            state.account.unread_count,
-            state.account.total_count,
-            state.account.last_synced
-        ),
-        muted,
-    )]);
-    let line3 = Line::from(vec![
-        Span::styled("Type a ", muted),
-        Span::styled("number", text_bold),
-        Span::styled(" to open · ", muted),
-        Span::styled("/", text_bold),
-        Span::styled(" for commands · ", muted),
-        Span::styled("?", text_bold),
-        Span::styled(" for shortcuts", muted),
-    ]);
+    let logged_out = state.account.email.is_empty() || state.account.mailbox_id.is_empty();
+    let (line2, line3) = if logged_out {
+        (
+            Line::from(vec![Span::styled("Not logged in.", muted)]),
+            Line::from(vec![
+                Span::styled("Type ", muted),
+                Span::styled("/login", text_bold),
+                Span::styled(" to authenticate · ", muted),
+                Span::styled("?", text_bold),
+                Span::styled(" for shortcuts", muted),
+            ]),
+        )
+    } else {
+        (
+            Line::from(vec![Span::styled(
+                format!(
+                    "{} · {} unread · {} total · synced {}",
+                    state.account.email,
+                    state.account.unread_count,
+                    state.account.total_count,
+                    state.account.last_synced
+                ),
+                muted,
+            )]),
+            Line::from(vec![
+                Span::styled("Type a ", muted),
+                Span::styled("number", text_bold),
+                Span::styled(" to open · ", muted),
+                Span::styled("/", text_bold),
+                Span::styled(" for commands · ", muted),
+                Span::styled("?", text_bold),
+                Span::styled(" for shortcuts", muted),
+            ]),
+        )
+    };
 
     let inner = Rect {
         x: area.x + 2,
@@ -620,7 +742,9 @@ fn draw_rows(frame: &mut Frame, area: Rect, state: &AppState, unified: bool) {
             .take(take_n)
             .enumerate()
             .map(|(i, m)| {
-                let picked = state.multi_selected.contains_key(&m.meta.id);
+                let picked = state
+                    .multi_selected
+                    .contains(&(m.mailbox_id.clone(), m.meta.id.clone()));
                 row_line(
                     i,
                     m,

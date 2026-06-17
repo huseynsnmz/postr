@@ -107,6 +107,18 @@ pub enum AppEvent {
     /// Read-only flash from a background task (e.g. `/whoami`, `/mailbox-list`)
     /// — shows as an info flash without triggering an inbox reload.
     Notice(String),
+    /// `/login` prompt's background `me()` succeeded. Carries everything the
+    /// App needs to swap into a logged-in state.
+    LoginSucceeded {
+        url: String,
+        token: String,
+        email: String,
+        mailboxes: Vec<crate::api::types::CliMailbox>,
+    },
+    /// `/login` prompt's background `me()` failed. The string is surfaced in
+    /// the prompt's error line and the prompt stays open so the user can
+    /// correct + resubmit.
+    LoginFailed(String),
 }
 
 /// Active mailbox scope: a single named mailbox, or the `/switch all`
@@ -562,6 +574,18 @@ impl App {
                 self.state.clear_undo_if_expired();
             }
             AppEvent::Notice(s) => self.state.flash_info(s),
+            AppEvent::LoginSucceeded {
+                url,
+                token,
+                email,
+                mailboxes,
+            } => self.on_login_succeeded(url, token, email, mailboxes),
+            AppEvent::LoginFailed(err) => {
+                if let Some(p) = self.state.login_prompt.as_mut() {
+                    p.busy = false;
+                    p.error = Some(err);
+                }
+            }
             AppEvent::MailboxesLoaded(list) => {
                 if let Some(picker) = self.state.mailbox_picker.as_mut() {
                     picker.loading = false;
@@ -734,6 +758,10 @@ impl App {
         }
         // Picker overlays eat every key so the user can't accidentally
         // interact with the screen behind them.
+        if self.state.login_prompt.is_some() {
+            self.handle_key_login_prompt(key);
+            return;
+        }
         if self.state.mailbox_picker.is_some() {
             self.handle_key_mailbox_picker(key);
             return;
@@ -1079,9 +1107,9 @@ impl App {
             // single row at a time.
             KeyCode::Char(' ') => {
                 if let Some(m) = self.state.selected_meta().cloned() {
-                    let id = m.meta.id;
-                    if self.state.multi_selected.remove(&id).is_none() {
-                        self.state.multi_selected.insert(id, m.mailbox_id);
+                    let key = (m.mailbox_id, m.meta.id);
+                    if !self.state.multi_selected.remove(&key) {
+                        self.state.multi_selected.insert(key);
                     }
                 }
             }
@@ -1505,8 +1533,49 @@ impl App {
     }
 
     fn run_login(&mut self) {
-        self.state
-            .flash_info("Run `postr login <url>` from the shell to (re-)authenticate.");
+        // Open the overlay; pre-fill the URL field if we already have one
+        // from a prior session (e.g. user is re-authenticating after a
+        // token rotation).
+        self.state.login_prompt =
+            Some(crate::state::LoginPromptState::new(&self.cfg.worker_base_url));
+        self.state.flash_info("Enter your worker URL + token. ⇥ to switch, ⏎ to submit.");
+    }
+
+    /// Background `me()` succeeded — persist the config + token, swap in a
+    /// fresh `ApiClient`, close the prompt, and load the inbox.
+    fn on_login_succeeded(
+        &mut self,
+        url: String,
+        token: String,
+        email: String,
+        mailboxes: Vec<crate::api::types::CliMailbox>,
+    ) {
+        let default_mailbox_id = mailboxes.first().map(|m| m.id.clone());
+        let new_cfg = Config {
+            worker_base_url: url.clone(),
+            email: Some(email.clone()),
+            default_mailbox_id: default_mailbox_id.clone(),
+            token: Some(token.clone()),
+        };
+        if let Err(e) = new_cfg.save() {
+            self.state.flash_error(format!("Login OK but config save failed: {e}"));
+            return;
+        }
+        match ApiClient::new(&url, &token) {
+            Ok(c) => {
+                self.client = Arc::new(c);
+                self.cfg = new_cfg;
+                let mailbox_id = default_mailbox_id.unwrap_or_default();
+                self.state.account.email = email;
+                self.state.account.mailbox_id = mailbox_id.clone();
+                self.mailbox_id = mailbox_id;
+                self.scope = ActiveScope::Single;
+                self.state.login_prompt = None;
+                self.state.flash_success("Logged in.");
+                self.spawn_load_inbox();
+            }
+            Err(e) => self.state.flash_error(format!("ApiClient build failed: {e}")),
+        }
     }
 
     fn run_whoami(&mut self) {
@@ -1795,7 +1864,10 @@ impl App {
     /// unified inbox across every registered mailbox.
     fn run_switch(&mut self, args: &str) {
         let arg = args.trim();
-        if arg.eq_ignore_ascii_case("all") {
+        // Bare `/switch` defaults to the unified inbox — most users hitting
+        // it want "see everything", and the picker is still reachable by
+        // typing a partial address/alias after `/switch `.
+        if arg.is_empty() || arg.eq_ignore_ascii_case("all") {
             self.enter_unified_inbox();
             return;
         }
@@ -1875,6 +1947,85 @@ impl App {
         self.state.mode = Mode::Loading(LoadingKind::Inbox);
         self.state.flash_info(format!("Folder: {folder}"));
         self.spawn_load_inbox();
+    }
+
+    fn handle_key_login_prompt(&mut self, key: KeyEvent) {
+        use crate::state::LoginField;
+        let Some(p) = self.state.login_prompt.as_mut() else {
+            return;
+        };
+        // Any keystroke clears the previous error so it doesn't linger past
+        // the user's attempt to fix it.
+        p.error = None;
+        match key.code {
+            KeyCode::Esc => {
+                self.state.login_prompt = None;
+            }
+            _ if p.busy => (),
+            KeyCode::Tab | KeyCode::BackTab => {
+                p.focus = match p.focus {
+                    LoginField::Url => LoginField::Token,
+                    LoginField::Token => LoginField::Url,
+                };
+            }
+            KeyCode::Backspace => {
+                let buf = match p.focus {
+                    LoginField::Url => &mut p.url,
+                    LoginField::Token => &mut p.token,
+                };
+                buf.pop();
+            }
+            KeyCode::Enter => {
+                let url = p.url.trim().trim_end_matches('/').to_string();
+                let token = p.token.trim().to_string();
+                if url.is_empty() {
+                    p.error = Some("URL is required".into());
+                    p.focus = LoginField::Url;
+                    return;
+                }
+                if token.is_empty() {
+                    p.error = Some("Token is required".into());
+                    p.focus = LoginField::Token;
+                    return;
+                }
+                p.busy = true;
+                self.spawn_login(url, token);
+            }
+            KeyCode::Char(ch) => {
+                let buf = match p.focus {
+                    LoginField::Url => &mut p.url,
+                    LoginField::Token => &mut p.token,
+                };
+                buf.push(ch);
+            }
+            _ => {}
+        }
+    }
+
+    fn spawn_login(&self, url: String, token: String) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let client = match ApiClient::new(&url, &token) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::LoginFailed(e.to_string()));
+                    return;
+                }
+            };
+            match client.me().await {
+                Ok(me) => {
+                    let _ = tx.send(AppEvent::LoginSucceeded {
+                        url,
+                        token,
+                        email: me.email,
+                        mailboxes: me.mailboxes,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::LoginFailed(format!("{e}")));
+                }
+            }
+        });
     }
 
     fn handle_key_folder_picker(&mut self, key: KeyEvent) {
@@ -2028,11 +2179,12 @@ impl App {
     // ── Batch ops (apply over `multi_selected`) ─────────────────
 
     fn drain_selection(&mut self) -> Vec<(String, String)> {
+        // Returns (email_id, mailbox_id) to match the per-row spawn signatures.
         let out: Vec<(String, String)> = self
             .state
             .multi_selected
             .iter()
-            .map(|(id, mb)| (id.clone(), mb.clone()))
+            .map(|(mb, id)| (id.clone(), mb.clone()))
             .collect();
         self.state.multi_selected.clear();
         out
@@ -2244,20 +2396,25 @@ async fn run_loop(
     client: Arc<ApiClient>,
     cfg: Config,
 ) -> anyhow::Result<()> {
-    let mailbox_id = cfg
-        .default_mailbox_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no default mailbox — run `postr login` again"))?;
+    // Pre-login: there's no mailbox_id or email yet. We render a welcome
+    // screen that prompts for `/login`; once that completes we hot-swap the
+    // client and account, and `spawn_load_inbox` runs from the event loop.
+    let logged_in = !cfg.worker_base_url.is_empty()
+        && !client.token().is_empty()
+        && cfg.default_mailbox_id.is_some();
+    let mailbox_id = cfg.default_mailbox_id.clone().unwrap_or_default();
     let account = Account {
-        email: cfg.email.clone().unwrap_or(mailbox_id.clone()),
+        email: cfg.email.clone().unwrap_or_else(|| mailbox_id.clone()),
         unread_count: 0,
         total_count: 0,
-        last_synced: "—".into(),
+        last_synced: if logged_in { "—".into() } else { "not logged in".into() },
         mailbox_id,
     };
     let (tx, mut rx) = unbounded_channel::<AppEvent>();
     let mut app = App::new(client, account, cfg, tx.clone());
-    app.spawn_load_inbox();
+    if logged_in {
+        app.spawn_load_inbox();
+    }
 
     // Feedback expiry tick — pings every second so the flash line can clear
     // itself after its 5s TTL without per-render `Instant::now()` checks.
