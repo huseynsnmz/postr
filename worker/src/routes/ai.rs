@@ -18,7 +18,7 @@ use crate::auth::{auth_error_response, check_auth};
 use crate::mailbox;
 use crate::routes::emails::do_rpc_request;
 
-const AGENT_MODEL: &str = "@cf/moonshotai/kimi-k2.5";
+const AGENT_MODEL: &str = "@cf/moonshotai/kimi-k2.6";
 const FAST_MODEL: &str = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
 // ── HTTP helpers ──────────────────────────────────────────────────────
