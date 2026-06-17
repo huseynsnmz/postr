@@ -33,6 +33,12 @@ enum Cmd {
         /// Mailbox address to seed (must already exist on the worker)
         address: String,
     },
+    /// Check the DNS records for an outbound-sending domain. Validates
+    /// MX, SPF, DKIM, DMARC, and MTA-STS — does not require login.
+    Doctor {
+        /// Mailbox address (we resolve the domain from the right side)
+        address: String,
+    },
     /// Launch the TUI (default)
     Tui,
 }
@@ -104,6 +110,7 @@ async fn main() -> Result<()> {
         Cmd::Mailbox(MailboxCmd::List) => mailbox_list().await,
         Cmd::Mailbox(MailboxCmd::Remove { address }) => mailbox_remove(address).await,
         Cmd::DemoSeed { address } => demo_seed(address).await,
+        Cmd::Doctor { address } => postr::doctor::run(&address).await,
         Cmd::Tui => tui_entry().await,
     }
 }

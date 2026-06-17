@@ -45,6 +45,27 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 
    To populate a fresh mailbox with curated sample messages — useful for screenshots or a quick tour — run `postr demo-seed <addr>`. It's idempotent.
 
+### DNS — outbound deliverability
+
+Email Routing handles inbound automatically once your domain's catch-all points at this worker. **Outbound** is where receiver-side spam filters get strict; if mail from postr lands in Gmail's Promotions tab or Microsoft's quarantine, this is almost always why. Publish these four records on the sending domain:
+
+| Type | Name | Value | Why |
+|---|---|---|---|
+| `MX` | apex | `route1.mx.cloudflare.net`, `route2`, `route3` (priorities 1/2/3) | Email Routing forwards inbound to the worker |
+| `TXT` | apex | `v=spf1 include:_spf.mx.cloudflare.net ~all` | Authorises Cloudflare to send for the domain |
+| `TXT` | `cloudflare._domainkey` | (Cloudflare publishes this; CNAME or auto) | DKIM signature receivers verify against |
+| `TXT` | `_dmarc` | `v=DMARC1; p=none; rua=mailto:dmarc@yourdomain` | Tells receivers what to do with auth failures + where to send reports |
+
+`postr doctor <addr>` resolves all four (plus optional MTA-STS) and prints a coloured checklist with concrete fix-it lines. Run it before your first send and again any time outbound starts misbehaving:
+
+```bash
+postr doctor me@yourdomain.com
+```
+
+Exit code is non-zero if MX or SPF is missing or misaligned — useful for wiring into a CI smoke test.
+
+Start DMARC at `p=none` (monitoring-only), watch the aggregate reports for a few days, then tighten to `p=quarantine` and eventually `p=reject` once you've confirmed no legitimate sender is being rejected. Cloudflare's [DMARC Management dashboard](https://blog.cloudflare.com/dmarc-management-ga/) ingests the `rua` reports and visualises this for you.
+
 ### Why we pin `worker-build`
 
 `worker-build 0.8.4` is the sweet spot: it externalizes `cloudflare:email` in its esbuild step (broken in 0.8.1) but doesn't yet pass `--force-enable-abort-handler` to wasm-bindgen (added in 0.8.5, which requires an externref table that Rust's `wasm32-unknown-unknown` doesn't currently emit). `tools/install.sh` drops 0.8.4 into `worker/tools/worker-build/`; `wrangler.jsonc`'s `build.command` points there. Tracked in [TODO.md](./TODO.md).
@@ -85,7 +106,7 @@ Inspired by Cloudflare's [agentic-inbox](https://github.com/cloudflare/agentic-i
 - **CLI / TUI:** Rust, [ratatui](https://ratatui.rs), crossterm, `tui-textarea`, tokio, reqwest (rustls), `keyring`
 - **Worker:** Rust, [`workers-rs`](https://github.com/cloudflare/workers-rs) 0.8.5, `mail-parser`, hand-rolled `worker::Router` (no Hono)
 - **Storage:** Durable Object SQLite (one DB per mailbox, 8 migrations preserved from agentic-inbox) + R2 attachments
-- **AI:** Workers AI — `@cf/moonshotai/kimi-k2.5` (summarize/draft/triage) + `@cf/meta/llama-4-scout-17b-16e-instruct` (ask filter inference)
+- **AI:** Workers AI — `@cf/moonshotai/kimi-k2.6` (summarize/draft/triage) + `@cf/meta/llama-4-scout-17b-16e-instruct` (ask filter inference)
 - **Auth:** Bearer token for the CLI (`CLI_TOKEN` set via `wrangler secret put`)
 
 ## Getting started
